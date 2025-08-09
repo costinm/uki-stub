@@ -21,7 +21,7 @@
 #include "linux.h"
 
 /* magic string to find in the binary image */
-static const char __attribute__((used)) magic[] = "#### LoaderInfo: stub " VERSION " ####";
+static const char __attribute__((used)) magic[] = "#### LoaderInfo: stub  ####";
 
 static const EFI_GUID global_guid = EFI_GLOBAL_VARIABLE;
 
@@ -53,6 +53,17 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
                 uefi_call_wrapper(BS->Stall, 1, 3 * 1000 * 1000);
                 return err;
         }
+        // We want to print something - it takes a bit of time to load the rest
+        Print(L"Starting InitOS UKI stub\n");
+
+        UINTN index;
+	//EFI_EVENT event = sys_table->ConIn->WaitForKey;
+
+        //	SIMPLE_INPUT_INTERFACE *conIn = systemTable->ConIn;
+	SIMPLE_TEXT_OUTPUT_INTERFACE *conOut = sys_table->ConOut;
+	//conOut->OutputString(conOut, L"Press a key\n");
+
+	//sys_table->BootServices->WaitForEvent(1, &event, &index);
 
         root_dir = LibOpenRoot(loaded_image->DeviceHandle);
         if (!root_dir) {
@@ -62,6 +73,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         }
 
         loaded_image_path = DevicePathToStr(loaded_image->FilePath);
+        Print(L"Loaded %s (%a)\n", loaded_image->FilePath, loaded_image_path);
 
         if (efivar_get_raw(&global_guid, L"SecureBoot", &b, &size) == EFI_SUCCESS) {
                 if (*b > 0)
@@ -79,19 +91,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
         if (szs[0] > 0)
                 cmdline = (CHAR8 *)(loaded_image->ImageBase + addrs[0]);
 
-        /* if we are not in secure boot mode, accept a custom command line and replace the built-in one */
-        if (!secure && loaded_image->LoadOptionsSize > 0) {
-                CHAR16 *options;
-                CHAR8 *line;
-                UINTN i;
-
-                options = (CHAR16 *)loaded_image->LoadOptions;
-                line = AllocatePool((loaded_image->LoadOptionsSize / sizeof(CHAR16)) * sizeof(CHAR8));
-                for (i = 0; i < loaded_image->LoadOptionsSize; i++)
-                        line[i] = options[i];
-                cmdline = line;
-        }
-
+        Print(L"Executing linux %a\n", cmdline);
         err = linux_exec(image, cmdline,
                          (UINTN)loaded_image->ImageBase + addrs[1],
                          (UINTN)loaded_image->ImageBase + addrs[2], szs[2]);

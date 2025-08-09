@@ -16,59 +16,10 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with systemd; If not, see <http://www.gnu.org/licenses/>.
 
-ACLOCAL_AMFLAGS = -I m4 ${ACLOCAL_FLAGS}
-AM_MAKEFLAGS = --no-print-directory
-
-gummibootlibdir = $(prefix)/lib/gummiboot
-
-AM_CPPFLAGS = -include config.h
-AM_CFLAGS = \
-	-D_GNU_SOURCE \
-	-Wall \
-	-Wextra \
-	-Wmissing-prototypes \
-	-Wno-unused-parameter
-AM_LDFLAGS =
-
-EXTRA_DIST = autogen.sh README LICENSE
-CLEANFILES =
-
-# ------------------------------------------------------------------------------
-if HAVE_BLKID
-bin_PROGRAMS = gummiboot
-
-gummiboot_SOURCES = \
-	src/setup/setup.c \
-	src/setup/efivars.c \
-	src/setup/efivars.h
-
-gummiboot_CPPFLAGS = \
-	$(AM_CPPFLAGS) \
-	-DMACHINE_TYPE_NAME=\"$(MACHINE_TYPE_NAME)\" \
-	-DGUMMIBOOTLIBDIR=\"$(gummibootlibdir)\"
-
-gummiboot_CFLAGS = \
-	$(AM_CFLAGS) \
-	$(BLKID_CFLAGS)
-
-gummiboot_LDADD = \
-	$(BLKID_LIBS)
-endif
-
-if ENABLE_MANPAGES
-%.8: %.xml
-	$(AM_V_GEN)$(XSLTPROC) -o $@ --nonet \
-	  --stringparam man.output.quietly 1 \
-	  --stringparam man.th.extra1.suppress 1 \
-	  --stringparam man.authors.section.enabled 0 \
-	  --stringparam man.copyright.section.enabled 0 \
-	  http://docbook.sourceforge.net/release/xsl/current/manpages/docbook.xsl $<
-
-dist_man_MANS = man/gummiboot.8
-endif
-
-EXTRA_DIST += man/gummiboot.xml
-CLEANFILES += man/gummiboot.8
+out=${HOME}/.cache/initos
+src=.
+cmd=loglevel=0 quiet earlyprintk=efi foo=bar console=ttyS0,115200 rdinit=/sbin/initos-initrd net.ifnames=0 panic=5 debug_init initos_debug=1 -- test123
+cmd:=initos_modloop=/dev/sdc initos_sidecar=/dev/sdd ${cmd}
 
 # ------------------------------------------------------------------------------
 # EFI compilation -- this part of the build system uses custom make rules and
@@ -76,9 +27,7 @@ CLEANFILES += man/gummiboot.8
 # flags.
 efi_cppflags = \
 	$(EFI_CPPFLAGS) \
-	-I$(top_builddir) -include config.h \
-	-I$(EFI_INC_DIR)/efi \
-	-I$(EFI_INC_DIR)/efi/$(ARCH) \
+	-I/usr/include/efi -I/usr/include -I/usr/include/x86_64-linux-gnu \
 	-DMACHINE_TYPE_NAME=\"$(MACHINE_TYPE_NAME)\"
 
 efi_cflags = \
@@ -97,59 +46,31 @@ efi_cflags = \
 	-mno-sse \
 	-mno-mmx
 
-if ARCH_X86_64
+ARCH=x86_64
+
+
+
+CFLAGS=-I. -I$(INCDIR) -I$(INCDIR)/$(ARCH) \
+		-DGNU_EFI_USE_MS_ABI -fPIC -fshort-wchar -ffreestanding \
+		-fno-stack-protector -maccumulate-outgoing-args \
+		-Wall -D$(ARCH) -Werror
+
 efi_cflags += \
-	-mno-red-zone \
+	-mno-red-zone -m64 \
 	-DEFI_FUNCTION_WRAPPER \
 	-DGNU_EFI_USE_MS_ABI
-endif
+
+FORMAT=efi-app-$(ARCH)
 
 efi_ldflags = \
 	$(EFI_LDLAGS) \
-	-T $(EFI_LDS_DIR)/elf_$(ARCH)_efi.lds \
+	-T /usr/lib/elf_$(ARCH)_efi.lds \
 	-shared \
 	-Bsymbolic \
 	-nostdlib \
 	-znocombreloc \
-	-L $(EFI_LIB_DIR) \
-	$(EFI_LDS_DIR)/crt0-efi-$(ARCH).o
-
-# ------------------------------------------------------------------------------
-gummiboot_headers = \
-	src/efi/util.h \
-	src/efi/console.h \
-	src/efi/graphics.h \
-	src/efi/pefile.h
-
-gummiboot_sources = \
-	src/efi/util.c \
-	src/efi/console.c \
-	src/efi/graphics.c \
-	src/efi/pefile.c \
-	src/efi/gummiboot.c
-
-gummiboot_objects = $(addprefix $(top_builddir)/,$(gummiboot_sources:.c=.o))
-gummiboot_solib = $(top_builddir)/src/efi/gummiboot.so
-gummiboot = gummiboot$(MACHINE_TYPE_NAME).efi
-
-gummibootlib_DATA = $(gummiboot)
-CLEANFILES += $(gummiboot_objects) $(gummiboot_solib) $(gummiboot)
-EXTRA_DIST += $(gummiboot_sources) $(gummiboot_headers)
-
-$(top_builddir)/src/efi/%.o: $(top_srcdir)/src/efi/%.c $(addprefix $(top_srcdir)/,$(gummiboot_headers))
-	@$(MKDIR_P) $(top_builddir)/src/efi/
-	$(AM_V_CC)$(EFI_CC) $(efi_cppflags) $(efi_cflags) -c $< -o $@
-
-$(gummiboot_solib): $(gummiboot_objects)
-	$(AM_V_CCLD)$(LD) $(efi_ldflags) $(gummiboot_objects) \
-		-o $@ -lefi -lgnuefi $(shell $(CC) -print-libgcc-file-name); \
-	nm -D -u $@ | grep ' U ' && exit 1 || :
-.DELETE_ON_ERROR: $(gummboot_solib)
-
-$(gummiboot): $(gummiboot_solib)
-	$(AM_V_GEN) objcopy -j .text -j .sdata -j .data -j .dynamic \
-	  -j .dynsym -j .rel -j .rela -j .reloc \
-	  --target=efi-app-$(ARCH) $< $@
+	-L /usr/lib \
+	/usr/lib/crt0-efi-$(ARCH).o
 
 # ------------------------------------------------------------------------------
 stub_headers = \
@@ -163,40 +84,103 @@ stub_sources = \
 	src/efi/linux.c \
 	src/efi/stub.c
 
-stub_objects = $(addprefix $(top_builddir)/,$(stub_sources:.c=.o))
-stub_solib = $(top_builddir)/src/efi/stub.so
-stub = linux$(MACHINE_TYPE_NAME).efi.stub
+stub_objects = $(addprefix $(out)/,$(stub_sources:.c=.o))
+stub_solib = $(out)/src/efi/stub.so
+stub = ${out}/boot/linux$(MACHINE_TYPE_NAME).efi.stub
 
-gummibootlib_DATA += $(stub)
-CLEANFILES += $(stub_objects) $(stub_solib) $(stub)
-EXTRA_DIST += $(stub_sources) $(stub_headers)
-
-$(top_builddir)/src/efi/%.o: $(top_srcdir)/src/efi/%.c $(addprefix $(top_srcdir)/,$(stub_headers))
-	@$(MKDIR_P) $(top_builddir)/src/efi/
-	$(AM_V_CC)$(EFI_CC) $(efi_cppflags) $(efi_cflags) -c $< -o $@
-
-$(stub_solib): $(stub_objects)
-	$(AM_V_CCLD)$(LD) $(efi_ldflags) $(stub_objects) \
-		-o $@ -lefi -lgnuefi $(shell $(CC) -print-libgcc-file-name); \
-	nm -D -u $@ | grep ' U ' && exit 1 || :
-.DELETE_ON_ERROR: $(gummboot_solib)
+all: $(stub)
 
 $(stub): $(stub_solib)
-	$(AM_V_GEN) objcopy -j .text -j .sdata -j .data -j .dynamic \
+	objcopy -j .text -j .sdata -j .data -j .dynamic \
 	  -j .dynsym -j .rel -j .rela -j .reloc \
 	  --target=efi-app-$(ARCH) $< $@
 
-# ------------------------------------------------------------------------------
-CLEANFILES += test-disk.img
-EXTRA_DIST += test/test-create-disk.sh
+# Build and test the stub.
+btest: ${stub} ${out}/test.img ${out}/boot/initos-patch.img test
 
-test-disk.img: gummiboot$(MACHINE_TYPE_NAME).efi test/test-create-disk.sh
-	$(AM_V_GEN)test/test-create-disk.sh
+qemu_disks=-drive file=${out}/efi/initos/modloop.sqfs \
+	   -drive file=${out}/efi/initos/sidecar.sqfs 
 
-qemu: test-disk.img
-	$(QEMU) -machine accel=kvm -m 256 -bios $(QEMU_BIOS) -snapshot test-disk.img
+qemu_common=-m 1G -smp 4 -cpu host -enable-kvm -display none
+qemu_serial=-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0 \
 
-install-tree: all
-	rm -rf $(abs_srcdir)/install-tree
-	$(MAKE) install DESTDIR=$(abs_srcdir)/install-tree
-	tree $(abs_srcdir)/install-tree
+# Use qemu - with fat:rw (max 516MB) disk containing the EFI.
+test-efi: initos-patch
+	mkdir -p ${out}/qemu/boot/EFI/BOOT
+	
+	bash -x ${src}/../sidecar/sbin/efi-mkuki -S ${stub} \
+	-c "${cmd}" \
+	-o ${out}/qemu/boot/EFI/BOOT/BOOTx64.EFI \
+	 ${out}/boot/vmlinuz-$(shell cat ${out}/boot/version) \
+	 ${out}/boot/initos-initrd.img \
+	 ${out}/qemu/initos-patch.img
+
+    # stdio - no input ?
+    # mon:stdio - C-a x
+	# -display none -serial stdio
+
+	qemu-system-x86_64 ${qemu_common}  \
+	   -bios /usr/share/qemu/OVMF.fd \
+	   -hda fat:rw:${out}/qemu/boot \
+	   ${qemu_serial} ${qemu_disks} ${out}/test.img 
+
+test-efi-signed: 
+	mkdir -p ${out}/qemu/signed/EFI/BOOT ${out}/qemu/signed/initos
+
+	cp ${out}/efi/InitOS-debug.EFI ${out}/qemu/signed/EFI/BOOT/BOOTx64.EFI
+	cp ${out}/efi/initos/modloop* ${out}/qemu/signed/initos
+	cp ${out}/efi/initos/sidecar* ${out}/qemu/signed/initos
+    # stdio - no input ?
+    # mon:stdio - C-a x
+	# -display none -serial stdio
+
+	qemu-system-x86_64 ${qemu_common}  \
+	   -bios /usr/share/qemu/OVMF.fd \
+	   -hda fat:rw:${out}/qemu/signed \
+	   ${qemu_serial} ${qemu_disks} 
+
+
+test: initos-patch
+	cat ${out}/boot/initos-initrd.img ${out}/qemu/initos-patch.img > ${out}/qemu/initos-patched.img
+	qemu-system-x86_64 ${qemu_common}  \
+	 -kernel ${out}/boot/vmlinuz-$(shell cat ${out}/boot/version)  \
+	 -initrd ${out}/qemu/initos-patched.img \
+	 -append "${cmd}" \
+	${qemu_serial} ${qemu_disks}
+	   
+initos-patch:
+	mkdir -p ${out}/qemu/patch
+	cp -a ${src}/../sidecar/sbin ${out}/qemu/patch
+
+	(cd ${out}/qemu/patch; \
+   		find . \
+   | sort  | cpio --quiet --renumber-inodes -o -H newc \
+   | gzip) > ${out}/qemu/initos-patch.img
+
+# Extract the default initrd to a dir - which can be patched and inspected.
+initos-extract:
+	mkdir -p ${out}/initrd-full; 
+	(cd ${out}/initrd-full; gzip -dc < ${out}/boot/initos-initrd.img | cpio -id)
+
+
+${out}/test.img:
+	qemu-img create $@ 16M
+
+$(out)/src/efi/%.o: $(src)/src/efi/%.c $(addprefix $(src)/,$(stub_headers))
+	mkdir -p  $(out)/src/efi/
+	cc $(efi_cppflags) $(efi_cflags) -c $< -o $@
+
+$(stub_solib): $(stub_objects)
+	ld $(efi_ldflags) $(stub_objects) \
+		-o $@ -lefi -lgnuefi $(shell $(CC) -print-libgcc-file-name); \
+	nm -D -u $@ | grep ' U ' && exit 1 || :
+
+%.efi: %.so
+	objcopy -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel \
+		-j .rela -j .reloc -S --target=$(FORMAT) $^ $@
+
+%.so: %.o
+	$(LD) $(LDFLAGS) -o $@ $^ $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
+
+%.S: %.c
+	$(CC) $(INCDIR) $(CFLAGS) $(CPPFLAGS) -S $< -o $@
