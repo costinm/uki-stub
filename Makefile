@@ -16,10 +16,23 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with systemd; If not, see <http://www.gnu.org/licenses/>.
 
-out=${HOME}/.cache/initos
+out?=${HOME}/.cache/initos
+build=${out}
 src=.
+
+# For testing
 cmd=loglevel=0 quiet earlyprintk=efi foo=bar console=ttyS0,115200 rdinit=/sbin/initos-initrd net.ifnames=0 panic=5 debug_init initos_debug=1 -- test123
-cmd:=initos_modloop=/dev/sdc initos_sidecar=/dev/sdd ${cmd}
+cmd:=initos_sidecar=/dev/sdc ${cmd}
+
+qemu_disks=-drive file=${build}/efi/initos/sidecar.sqfs 
+
+qemu_base=-m 1G -smp 4 -cpu host -enable-kvm
+qemu_common=${qemu_base} -display none
+qemu_serial=-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0 \
+
+stub = ${out}/boot/linux$(MACHINE_TYPE_NAME).efi.stub
+ARCH=x86_64
+
 
 # ------------------------------------------------------------------------------
 # EFI compilation -- this part of the build system uses custom make rules and
@@ -27,8 +40,12 @@ cmd:=initos_modloop=/dev/sdc initos_sidecar=/dev/sdd ${cmd}
 # flags.
 efi_cppflags = \
 	$(EFI_CPPFLAGS) \
-	-I/usr/include/efi -I/usr/include -I/usr/include/x86_64-linux-gnu \
+	-I/usr/include/efi -I/usr/include \
+	-I/usr/include/efi/x86_64 \
+	-I/usr/include/x86_64-linux-gnu \
 	-DMACHINE_TYPE_NAME=\"$(MACHINE_TYPE_NAME)\"
+
+# Alpine is using x86_64, debian has linux-gnu suffix.
 
 efi_cflags = \
 	$(EFI_CFLAGS) \
@@ -45,8 +62,6 @@ efi_cflags = \
 	-Wsign-compare \
 	-mno-sse \
 	-mno-mmx
-
-ARCH=x86_64
 
 
 
@@ -84,36 +99,33 @@ stub_sources = \
 	src/efi/linux.c \
 	src/efi/stub.c
 
+
 stub_objects = $(addprefix $(out)/,$(stub_sources:.c=.o))
 stub_solib = $(out)/src/efi/stub.so
-stub = ${out}/boot/linux$(MACHINE_TYPE_NAME).efi.stub
 
 all: $(stub)
 
 $(stub): $(stub_solib)
+	mkdir -p ${out}/boot
 	objcopy -j .text -j .sdata -j .data -j .dynamic \
 	  -j .dynsym -j .rel -j .rela -j .reloc \
 	  --target=efi-app-$(ARCH) $< $@
 
 # Build and test the stub.
-btest: ${stub} ${out}/test.img ${out}/boot/initos-patch.img test
+btest: ${stub} ${build}/test.img ${build}/boot/initos-patch.img test
 
-qemu_disks=-drive file=${out}/efi/initos/modloop.sqfs \
-	   -drive file=${out}/efi/initos/sidecar.sqfs 
-
-qemu_common=-m 1G -smp 4 -cpu host -enable-kvm -display none
-qemu_serial=-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0 \
 
 # Use qemu - with fat:rw (max 516MB) disk containing the EFI.
 test-efi: initos-patch
-	mkdir -p ${out}/qemu/boot/EFI/BOOT
+	mkdir -p ${build}/qemu/boot/EFI/BOOT
 	
-	bash -x ${src}/../sidecar/sbin/efi-mkuki -S ${stub} \
+	bash -x ${src}/../initos/sidecar/sbin/efi-mkuki \
+	-S ${stub} \
 	-c "${cmd}" \
-	-o ${out}/qemu/boot/EFI/BOOT/BOOTx64.EFI \
-	 ${out}/boot/vmlinuz-$(shell cat ${out}/boot/version) \
-	 ${out}/boot/initos-initrd.img \
-	 ${out}/qemu/initos-patch.img
+	-o ${build}/qemu/boot/EFI/BOOT/BOOTx64.EFI \
+	 ${build}/boot/vmlinuz-$(shell cat ${build}/boot/version) \
+	 ${build}/boot/initos-initrd.img \
+	 ${build}/qemu/initos-patch.img
 
     # stdio - no input ?
     # mon:stdio - C-a x
@@ -121,49 +133,57 @@ test-efi: initos-patch
 
 	qemu-system-x86_64 ${qemu_common}  \
 	   -bios /usr/share/qemu/OVMF.fd \
-	   -hda fat:rw:${out}/qemu/boot \
-	   ${qemu_serial} ${qemu_disks} ${out}/test.img 
+	   -hda fat:rw:${build}/qemu/boot \
+	   ${qemu_serial} ${qemu_disks} ${build}/test.img 
 
-test-efi-signed: 
-	mkdir -p ${out}/qemu/signed/EFI/BOOT ${out}/qemu/signed/initos
+build-efi-unsigned: 
+	mkdir -p ${build}/qemu/unsigned/EFI/BOOT ${build}/qemu/unsigned/initos
 
-	cp ${out}/efi/InitOS-debug.EFI ${out}/qemu/signed/EFI/BOOT/BOOTx64.EFI
-	cp ${out}/efi/initos/modloop* ${out}/qemu/signed/initos
-	cp ${out}/efi/initos/sidecar* ${out}/qemu/signed/initos
-    # stdio - no input ?
-    # mon:stdio - C-a x
-	# -display none -serial stdio
+	# (cd ../initos && \
+	#     podman build  . -f Dockerfile.dev \
+	#        --output ${build}/qemu/unsigned)
+	(cd ../initos && \
+	   podman run -e TTY=ttyS0  \
+	      -v ${build}/qemu/unsigned:/data/efi \
+	      -v ${src}/../initos:/src \
+		  sidecar \
+		     bash -x /src/sidecar/sbin/setup-efi unsigned)
+	
+	cp ${build}/efi/initos/sidecar.sqfs ${build}/qemu/unsigned/initos
+	mv ${build}/qemu/unsigned/InitOS-debug.EFI ${build}/qemu/unsigned/EFI/BOOT/BOOTx64.EFI
+	
 
-	qemu-system-x86_64 ${qemu_common}  \
+test-efi-unsigned: 
+	qemu-system-x86_64 ${qemu_base} -display none  \
 	   -bios /usr/share/qemu/OVMF.fd \
-	   -hda fat:rw:${out}/qemu/signed \
+	   -hda fat:rw:${build}/qemu/unsigned \
 	   ${qemu_serial} ${qemu_disks} 
 
 
 test: initos-patch
-	cat ${out}/boot/initos-initrd.img ${out}/qemu/initos-patch.img > ${out}/qemu/initos-patched.img
+	cat ${build}/boot/initos-initrd.img ${build}/qemu/initos-patch.img > ${build}/qemu/initos-patched.img
 	qemu-system-x86_64 ${qemu_common}  \
-	 -kernel ${out}/boot/vmlinuz-$(shell cat ${out}/boot/version)  \
-	 -initrd ${out}/qemu/initos-patched.img \
+	 -kernel ${build}/boot/vmlinuz-$(shell cat ${build}/boot/version)  \
+	 -initrd ${build}/qemu/initos-patched.img \
 	 -append "${cmd}" \
 	${qemu_serial} ${qemu_disks}
 	   
 initos-patch:
-	mkdir -p ${out}/qemu/patch
-	cp -a ${src}/../sidecar/sbin ${out}/qemu/patch
+	mkdir -p ${build}/qemu/patch
+	cp -a ${src}/../initos/sidecar/sbin ${build}/qemu/patch
 
-	(cd ${out}/qemu/patch; \
+	(cd ${build}/qemu/patch; \
    		find . \
    | sort  | cpio --quiet --renumber-inodes -o -H newc \
-   | gzip) > ${out}/qemu/initos-patch.img
+   | gzip) > ${build}/qemu/initos-patch.img
 
 # Extract the default initrd to a dir - which can be patched and inspected.
 initos-extract:
-	mkdir -p ${out}/initrd-full; 
-	(cd ${out}/initrd-full; gzip -dc < ${out}/boot/initos-initrd.img | cpio -id)
+	mkdir -p ${build}/initrd-full; 
+	(cd ${build}/initrd-full; gzip -dc < ${build}/boot/initos-initrd.img | cpio -id)
 
 
-${out}/test.img:
+${build}/test.img:
 	qemu-img create $@ 16M
 
 $(out)/src/efi/%.o: $(src)/src/efi/%.c $(addprefix $(src)/,$(stub_headers))
