@@ -1,0 +1,47 @@
+#!/bin/sh
+
+# Packages for generating the UKI and optional initrd.
+# 
+# This can be used to create a standalone signer/builder - but 
+# for now moving it back to the sidecar, simpler.
+# 
+# To check: gzip -dc ../initos-initrd.img | cpio -idmv
+add_signer() {
+  apk add  \
+    efi-mkkeys sbsigntool \
+    mkinitfs binutils  \
+    zstd tar \
+     uuidgen \
+     squashfs-tools cryptsetup dosfstools eudev
+      
+  # tar - required for multiple -C for creating the sqfs.
+
+  # No longer used: efi-mkuki (forked, upstream no longer works - systemd )
+  # gummiboot - forked 
+
+
+  # Udev used in initrd
+  
+  echo 'disable_trigger=yes' >> /etc/mkinitfs/mkinitfs.conf
+
+}
+
+add_builder() {
+  apk add  \
+    efi-mkkeys sbsigntool \
+    mkinitfs binutils  \
+    zstd tar \
+     uuidgen \
+     squashfs-tools cryptsetup dosfstools eudev
+      
+  apk add zig
+  curl -L -O - https://github.com/usbarmory/tamago-go/releases/download/tamago-go1.25.0/tamago-go1.25.0.linux-amd64.tar.gz \
+    | tar xvfz -
+
+  # Udev used in initrd
+  
+  echo 'disable_trigger=yes' >> /etc/mkinitfs/mkinitfs.conf
+
+}
+
+"$@"

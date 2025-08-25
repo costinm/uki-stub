@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# Setup for the optional initrd.
+# If the kernel has the NVME/eMMC/SATA drivers and EXT4 support - this is not used.
+
+set -x
+set -e
+
+# Build the initramfs for the real kernel
+# Expectes /boot, /lib/modules, /lib/firmware to have the right
+# mounts and /boot/version to hold the desired kernel version.
+# 
+# This runs in an alpine container (for now) - the init will be based
+# on the lighter musl binaries.
+build_initrd() {
+  local destdir=${1:-/data/boot/}
+
+  local VER=$(cat /boot/version)
+  local img=${destdir}/initos-initrd.img
+  mkdir -p ${destdir}
+
+  [ ! -f /lib/modules/${VER}/modules.dep ] && echo "Missing modules" && return
+
+    # Uses mkinitfs.conf added from file in the docker image.
+    # Other options: virtio, squashfs, 9p, raid, cdrom, lvm, ext4, kms (video)
+
+    # -k - keep the file
+    # -t - temp dir where all is stored
+    # -i - what init file to use - replace default with our script.
+
+    cp /etc/passwd /usr/share/mkinitfs/passwd
+    cp /etc/group /usr/share/mkinitfs/group
+
+    cp /boot/vmlinuz-${VER} ${destdir}/vmlinuz
+
+    kernel_version=$(cat /boot/version) # Created on download
+
+    rm -rf ${destdir}/initrd
+    
+    mkinitfs -i /sbin/initos-initrd \
+      -t ${destdir}/initrd -k \
+      -F "ata base keymap mmc nvme scsi usb cryptsetup squashfs ext4 initos eudev" \
+      -o ${img} $VER
+}
+
+
+if [ -z ${1+x} ] ; then
+  build_initrd
+else
+  "$@"
+fi
