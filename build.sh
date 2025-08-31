@@ -84,43 +84,6 @@ run_qemu() {
 
 }
 
-# Go EFI is an experiment to evaluate go capabilities.
-# The size is too big, and temptation to do more and add features
-# is too high. Currently requires tamago-go, which also makes it 
-# more complicated (no docker image I can find)
-buildgo() {
-    export GOOS=windows
-    export GOARCH=amd64
-    export CGO_ENABLED=0
-
-    export PATH=${HOME}/opt/tamago-go/bin:${PATH}
-    export GOOS=tamago
-
-    CONSOLE=text
-    BUILD_TAGS=linkcpuinit,linkramsize,linkramstart,linkprintk
-    # the .txt entry is at 0x10000 offset
-    IMAGE_BASE=0x10000000
-    TEXT_START=10010000
-
-    GOFLAGS="-tags ${BUILD_TAGS} -trimpath  "
-
-    # Build the Go UEFI application
-    echo "Building ${APP}.efi..."
-    cd "${PROJECT_ROOT}"
-    go build ${GOFLAGS} -ldflags '-s -w -E cpuinit -T 0x10010000 -R 0x1000 ' \
-        -o ${BUILD_DIR}/${APP}.elf ./cmd/${APP}/
-
-    objcopy \
-            --strip-debug \
-            --target efi-app-x86_64 \
-            --subsystem=efi-app \
-            --image-base ${IMAGE_BASE} \
-            --stack=0x10000 \
-            ${BUILD_DIR}/${APP}.elf \
-            ${BUILD_DIR}/${APP}.efi 
-
-    printf '\x26\x02' | dd of=${BUILD_DIR}/${APP}.efi bs=1 seek=150 count=2 conv=notrunc,fsync 
-}
 
 # Verified boot - SHA256 of the initrd included
 ver() {
@@ -164,10 +127,5 @@ unvr() {
     run_qemu ${BUILD_DIR}/qemu-unv
 }
 
-
-all() {
-    #(cd /x/linux/linux-6.16 && make && cp arch/x86/boot/bzImage ${BUILD_DIR}/qemu/kernel.efi)
-    qemu
-}
 
 "$@"
