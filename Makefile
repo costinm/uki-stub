@@ -20,34 +20,18 @@ out?=${HOME}/.cache/initos
 build=${out}
 src=.
 
-# For testing
-cmd=loglevel=0 quiet earlyprintk=efi foo=bar console=ttyS0,115200 rdinit=/sbin/initos-initrd net.ifnames=0 panic=5 debug_init initos_debug=1 -- test123
-cmd:=initos_sidecar=/dev/sdc ${cmd}
-
-qemu_disks=-drive file=${build}/efi/initos/sidecar.sqfs 
-
-qemu_base=-m 1G -smp 4 -cpu host -enable-kvm
-qemu_common=${qemu_base} -display none
-qemu_serial=-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0 \
-
 stub = ${out}/boot/linux$(MACHINE_TYPE_NAME).efi.stub
 ARCH=x86_64
 
 
 # ------------------------------------------------------------------------------
-# EFI compilation -- this part of the build system uses custom make rules and
-# bypasses regular automake to provide absolute control on compiler and linker
-# flags.
-efi_cppflags = \
-	$(EFI_CPPFLAGS) \
-	-I/usr/include/efi -I/usr/include \
-	-I/usr/include/efi/x86_64 \
-	-I/usr/include/x86_64-linux-gnu \
-	-DMACHINE_TYPE_NAME=\"$(MACHINE_TYPE_NAME)\"
-
 # Alpine is using x86_64, debian has linux-gnu suffix.
 
 efi_cflags = \
+	-I/usr/include/efi -I/usr/include \
+	-I/usr/include/efi/x86_64 \
+	-I/usr/include/x86_64-linux-gnu \
+	-DMACHINE_TYPE_NAME=\"$(MACHINE_TYPE_NAME)\" \
 	$(EFI_CFLAGS) \
 	-Wall \
 	-Wextra \
@@ -62,8 +46,6 @@ efi_cflags = \
 	-Wsign-compare \
 	-mno-sse \
 	-mno-mmx
-
-
 
 CFLAGS=-I. -I$(INCDIR) -I$(INCDIR)/$(ARCH) \
 		-DGNU_EFI_USE_MS_ABI -fPIC -fshort-wchar -ffreestanding \
@@ -111,84 +93,9 @@ $(stub): $(stub_solib)
 	  -j .dynsym -j .rel -j .rela -j .reloc \
 	  --target=efi-app-$(ARCH) $< $@
 
-# Build and test the stub.
-btest: ${stub} ${build}/test.img ${build}/boot/initos-patch.img test
-
-
-# Use qemu - with fat:rw (max 516MB) disk containing the EFI.
-test-efi: initos-patch
-	mkdir -p ${build}/qemu/boot/EFI/BOOT
-	
-	bash -x ${src}/../initos/sidecar/sbin/efi-mkuki \
-	-S ${stub} \
-	-c "${cmd}" \
-	-o ${build}/qemu/boot/EFI/BOOT/BOOTx64.EFI \
-	 ${build}/boot/vmlinuz-$(shell cat ${build}/boot/version) \
-	 ${build}/boot/initos-initrd.img \
-	 ${build}/qemu/initos-patch.img
-
-    # stdio - no input ?
-    # mon:stdio - C-a x
-	# -display none -serial stdio
-
-	qemu-system-x86_64 ${qemu_common}  \
-	   -bios /usr/share/qemu/OVMF.fd \
-	   -hda fat:rw:${build}/qemu/boot \
-	   ${qemu_serial} ${qemu_disks} ${build}/test.img 
-
-build-efi-unsigned: 
-	mkdir -p ${build}/qemu/unsigned/EFI/BOOT ${build}/qemu/unsigned/initos
-
-	# (cd ../initos && \
-	#     podman build  . -f Dockerfile.dev \
-	#        --output ${build}/qemu/unsigned)
-	(cd ../initos && \
-	   podman run -e TTY=ttyS0  \
-	      -v ${build}/qemu/unsigned:/data/efi \
-	      -v ${src}/../initos:/src \
-		  sidecar \
-		     bash -x /src/sidecar/sbin/setup-efi unsigned)
-	
-	cp ${build}/efi/initos/sidecar.sqfs ${build}/qemu/unsigned/initos
-	mv ${build}/qemu/unsigned/InitOS-debug.EFI ${build}/qemu/unsigned/EFI/BOOT/BOOTx64.EFI
-	
-
-test-efi-unsigned: 
-	qemu-system-x86_64 ${qemu_base} -display none  \
-	   -bios /usr/share/qemu/OVMF.fd \
-	   -hda fat:rw:${build}/qemu/unsigned \
-	   ${qemu_serial} ${qemu_disks} 
-
-
-test: initos-patch
-	cat ${build}/boot/initos-initrd.img ${build}/qemu/initos-patch.img > ${build}/qemu/initos-patched.img
-	qemu-system-x86_64 ${qemu_common}  \
-	 -kernel ${build}/boot/vmlinuz-$(shell cat ${build}/boot/version)  \
-	 -initrd ${build}/qemu/initos-patched.img \
-	 -append "${cmd}" \
-	${qemu_serial} ${qemu_disks}
-	   
-initos-patch:
-	mkdir -p ${build}/qemu/patch
-	cp -a ${src}/../initos/sidecar/sbin ${build}/qemu/patch
-
-	(cd ${build}/qemu/patch; \
-   		find . \
-   | sort  | cpio --quiet --renumber-inodes -o -H newc \
-   | gzip) > ${build}/qemu/initos-patch.img
-
-# Extract the default initrd to a dir - which can be patched and inspected.
-initos-extract:
-	mkdir -p ${build}/initrd-full; 
-	(cd ${build}/initrd-full; gzip -dc < ${build}/boot/initos-initrd.img | cpio -id)
-
-
-${build}/test.img:
-	qemu-img create $@ 16M
-
 $(out)/src/efi/%.o: $(src)/src/efi/%.c $(addprefix $(src)/,$(stub_headers))
 	mkdir -p  $(out)/src/efi/
-	cc $(efi_cppflags) $(efi_cflags) -c $< -o $@
+	cc $(efi_cflags) -c $< -o $@
 
 $(stub_solib): $(stub_objects)
 	ld $(efi_ldflags) $(stub_objects) \
@@ -202,5 +109,10 @@ $(stub_solib): $(stub_objects)
 %.so: %.o
 	$(LD) $(LDFLAGS) -o $@ $^ $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
 
-%.S: %.c
-	$(CC) $(INCDIR) $(CFLAGS) $(CPPFLAGS) -S $< -o $@
+
+# %.S: %.c
+# 	$(CC) $(INCDIR) $(CFLAGS) $(CPPFLAGS) -S $< -o $@
+
+stub2:
+	#cd stub2 && zig build
+	./build.sh stub2

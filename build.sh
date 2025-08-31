@@ -1,118 +1,61 @@
 #!/bin/bash
 
+# Build and test script
+# Modern languages (go/rust/zig) include optimized build systems (and package
+# management).
+# Makefiles main feature - checking mod time and controlling the build
+# is no longer needed.
+# 
+# Testing on the other side should not be part of a specific language.
+# Shell and python seem better fit to work across languages.
+
+
 set -e
 
 # Build configuration
 BASH_SRC=$0 #{BASH_SOURCE[0]}
 BASE=$(dirname "${BASH_SRC}")
 PROJECT_ROOT="$(cd "${BASE}" && pwd)"
-BUILD_DIR=${BUILD_DIR:-"${PROJECT_ROOT}/build"}
+#BUILD_DIR=${BUILD_DIR:-"${PROJECT_ROOT}/build"}
+BUILD_DIR=${HOME}/.cache/$(basename ${PROJECT_ROOT})
+export ZIG_LOCAL_CACHE_DIR=${BUILD_DIR}/.zig-cache
 
 # QEMU configuration
 OVMF_PATH="${PROJECT_ROOT}/prebuilt/OVMF.fd"
 MOUNT_DIR="${BUILD_DIR}/mnt"
 
-buildgo() {
-    APP=${1}
-    echo "=== Building UEFI Go Application ==="
-    
-    # Create build directory
-    mkdir -p "${BUILD_DIR}"
+# Hardcoded in stub - any change must be done in both places.
+kernel_offset='0x30000000' 
+cfg_offset=0x20000000
 
-    # Set environment variables for UEFI cross-compilation
-    export GOOS=windows
-    export GOARCH=amd64
-    export CGO_ENABLED=0
+mkdir -p "${BUILD_DIR}"
 
-    export PATH=${HOME}/opt/tamago-go/bin:${PATH}
-    export GOOS=tamago
-
-
-    CONSOLE=text
-    BUILD_TAGS=linkcpuinit,linkramsize,linkramstart,linkprintk
-    # the .txt entry is at 0x10000 offset
-    IMAGE_BASE=0x10000000
-    TEXT_START=10010000
-
-    GOFLAGS="-tags ${BUILD_TAGS} -trimpath  "
-
-    # Build the Go UEFI application
-    echo "Building ${APP}.efi..."
-    cd "${PROJECT_ROOT}"
-    go build ${GOFLAGS} -ldflags '-s -w -E cpuinit -T 0x10010000 -R 0x1000 ' \
-        -o ${BUILD_DIR}/${APP}.elf ./cmd/${APP}/
-
-    objcopy \
-            --strip-debug \
-            --target efi-app-x86_64 \
-            --subsystem=efi-app \
-            --image-base ${IMAGE_BASE} \
-            --stack=0x10000 \
-            ${BUILD_DIR}/${APP}.elf \
-            ${BUILD_DIR}/${APP}.efi 
-
-        printf '\x26\x02' | dd of=${BUILD_DIR}/${APP}.efi bs=1 seek=150 count=2 conv=notrunc,fsync 
+build() {
+    (cd src/stub2 && zig build -p ${BUILD_DIR} -freference-trace=8)
+    cp ${BUILD_DIR}/img/ministub.efi prebuilt/uki-stub.efi
 }
 
-qemu() {
-    buildgo efi-verify
-    FATDIR=${BUILD_DIR}/qemu
+buildr() {
+    (cd src/stub2g && cargo build --target x86_64-unknown-uefi)
+    cp src/stub2g/target/x86_64-unknown-uefi/debug/uki-stub.efi prebuilt/uki-stub.efi
+}
 
-    kernel_offset='0x30000000' 
-    #cfg_offset='0x3f000000'
-    cfg_offset=0x20000000
-#        cp   ${BUILD_DIR}/efi-verify.efi  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-    mkdir -p ${BUILD_DIR}/qemu/EFI/BOOT
+# Generate BOOTx64.EFI
+gen() {
+    local FATDIR=${1}
+    local CFG=${2}
 
+    mkdir -p ${FATDIR}/EFI/BOOT ${FATDIR}/EFI/LINUX
+
+    #cp /x/linux/linux-6.16/arch/x86/boot/bzImage prebuilt/vmlinuz-custom
+    # Config can specify 0 as kernel size, stub will load from this fixed location
+    #cp prebuilt/vmlinuz-custom ${BUILD_DIR}/qemu/EFI/LINUX/kernel.efi
+    
     objcopy \
-        --add-section .cfg="prebuilt/cfg.qemu" --change-section-vma .cfg=$cfg_offset \
+        --add-section .cfg="${CFG}" --change-section-vma .cfg=$cfg_offset \
         --add-section .linux="prebuilt/vmlinuz-custom"     --change-section-vma ".linux=$kernel_offset"  \
-            ${BUILD_DIR}/efi-verify.efi \
-            ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-
-    #echo "Adjust vma"
-    # This corrects putting sections below the base image of the stub.
-    #objcopy --adjust-vma 0  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-    run_qemu ${FATDIR}
-}
-
-qemu2() {
-    APP=efiload
-    buildgo efiload
-    FATDIR=${BUILD_DIR}/qemu
-
-    kernel_offset='0x30000000' 
-    #cfg_offset='0x3f000000'
-    cfg_offset=0x20000000
-#        cp   ${BUILD_DIR}/efi-verify.efi  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-    mkdir -p ${BUILD_DIR}/qemu/EFI/BOOT
-
-    objcopy \
-        --add-section .cfg="prebuilt/cfg.qemu" --change-section-vma .cfg=$cfg_offset \
-        --add-section .linux="prebuilt/vmlinuz-custom"     --change-section-vma ".linux=$kernel_offset"  \
-            ${BUILD_DIR}/${APP}.efi \
-            ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-
-    #echo "Adjust vma"
-    # This corrects putting sections below the base image of the stub.
-    #objcopy --adjust-vma 0  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-    run_qemu ${FATDIR}
-}
-
-qemu_recovery() {
-    buildgo recovery
-    
-    FATDIR=${BUILD_DIR}/qemu-recovery
-
-    mkdir -p ${FATDIR}/EFI/BOOT ${FATDIR}/EFI/linux
-    
-    cp ${BUILD_DIR}/recovery.efi  ${FATDIR}/EFI/BOOT/bootx64.efi
-
-    cp prebuilt/vmlinuz-custom ${FATDIR}/EFI/linux/kernel.efi
-    cp prebuilt/initrd.img ${FATDIR}/EFI/linux/initrd.img
-    cp prebuilt/cmdline.qemu ${FATDIR}/EFI/linux/cmdline
-    
-    run_qemu ${FATDIR}
+            prebuilt/uki-stub.efi \
+            ${FATDIR}/EFI/BOOT/bootx64.efi
 }
 
 run_qemu() {    
@@ -139,6 +82,86 @@ run_qemu() {
         -no-reboot \
         -chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0 
 
+}
+
+# Go EFI is an experiment to evaluate go capabilities.
+# The size is too big, and temptation to do more and add features
+# is too high. Currently requires tamago-go, which also makes it 
+# more complicated (no docker image I can find)
+buildgo() {
+    export GOOS=windows
+    export GOARCH=amd64
+    export CGO_ENABLED=0
+
+    export PATH=${HOME}/opt/tamago-go/bin:${PATH}
+    export GOOS=tamago
+
+    CONSOLE=text
+    BUILD_TAGS=linkcpuinit,linkramsize,linkramstart,linkprintk
+    # the .txt entry is at 0x10000 offset
+    IMAGE_BASE=0x10000000
+    TEXT_START=10010000
+
+    GOFLAGS="-tags ${BUILD_TAGS} -trimpath  "
+
+    # Build the Go UEFI application
+    echo "Building ${APP}.efi..."
+    cd "${PROJECT_ROOT}"
+    go build ${GOFLAGS} -ldflags '-s -w -E cpuinit -T 0x10010000 -R 0x1000 ' \
+        -o ${BUILD_DIR}/${APP}.elf ./cmd/${APP}/
+
+    objcopy \
+            --strip-debug \
+            --target efi-app-x86_64 \
+            --subsystem=efi-app \
+            --image-base ${IMAGE_BASE} \
+            --stack=0x10000 \
+            ${BUILD_DIR}/${APP}.elf \
+            ${BUILD_DIR}/${APP}.efi 
+
+    printf '\x26\x02' | dd of=${BUILD_DIR}/${APP}.efi bs=1 seek=150 count=2 conv=notrunc,fsync 
+}
+
+# Verified boot - SHA256 of the initrd included
+ver() {
+    cfg=${1:-prebuilt/cfg.qemu}
+    build
+
+    gen ${BUILD_DIR}/qemu ${cfg}
+    cp prebuilt/initrd.img ${BUILD_DIR}/qemu/EFI/LINUX/initrd.img
+    #echo "Adjust vma"
+    # This corrects putting sections below the base image of the stub.
+    objcopy --adjust-vma 0  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
+    run_qemu ${BUILD_DIR}/qemu
+}
+
+# Unverified/install mode
+unv() {
+    cfg=${1:-prebuilt/cfg.qemu}
+    build
+
+    mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX ${BUILD_DIR}/qemu-unv/EFI/BOOT
+    cp prebuilt/initrd.img ${BUILD_DIR}/qemu-unv/EFI/LINUX/initrd.img
+    cp prebuilt/cmdline.qemu ${BUILD_DIR}/qemu-unv/EFI/LINUX/cmdline
+    cp prebuilt/vmlinuz-custom ${BUILD_DIR}/qemu-unv/EFI/LINUX/kernel.efi
+    cp  ${BUILD_DIR}/img/ministub.efi ${BUILD_DIR}/qemu-unv/EFI/BOOT/bootx64.efi
+
+    run_qemu ${BUILD_DIR}/qemu-unv
+}
+
+unvr() {
+    cfg=${1:-prebuilt/cfg.qemu}
+    buildr
+
+    mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX ${BUILD_DIR}/qemu-unv/EFI/BOOT
+    
+    cp prebuilt/initrd.img ${BUILD_DIR}/qemu-unv/EFI/LINUX/initrd.img
+    cp prebuilt/cmdline.qemu ${BUILD_DIR}/qemu-unv/EFI/LINUX/cmdline
+    cp prebuilt/vmlinuz-custom ${BUILD_DIR}/qemu-unv/EFI/LINUX/kernel.efi
+                
+    cp  prebuilt/uki-stub.efi ${BUILD_DIR}/qemu-unv/EFI/BOOT/bootx64.efi
+
+    run_qemu ${BUILD_DIR}/qemu-unv
 }
 
 
