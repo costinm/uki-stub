@@ -24,13 +24,13 @@ jobs:
       - name: stub binary
         uses: docker/build-push-action@v6
         with:
+          target: out
           push: true
           tags: ghcr.io/costinm/uki-stub/uki-stub:latest
 
       - name: stub binary
         uses: docker/build-push-action@v6
         with:
-          target: signer
           push: true
           tags: ghcr.io/costinm/uki-stub/uki-signer:latest
 
