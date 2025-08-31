@@ -41,10 +41,8 @@ VOLUME [ "/data" ]
 VOLUME [ "/config" ]
 VOLUME [ "/var/run/secrets"]
 
-# COPY --from=ghcr.io/costinm/uki-stub/uki-stub:latest /boot/linux.efi.stub \
-#   /usr/lib/efi-stub/linux-efi.stub
-COPY --from=uki-stub:latest /usr/lib/efi-stub \
-  /usr/lib/efi-stub
+COPY --from=builder /out/boot/linux.efi.stub /usr/lib/efi-stub/
+COPY --from=builder2 /out/img/ministub.efi /usr/lib/efi-stub/
 
 ENTRYPOINT [ "/sbin/setup-efi" ]
 
