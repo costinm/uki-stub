@@ -18,9 +18,8 @@ RUN --mount=target=/var/lib/cache,id=apt,type=cache \
 FROM stub-builder AS builder
 
 COPY ./src ./src
-COPY Makefile ./
 
-RUN  make out=/out
+RUN  (cd src/efi && make out=/out)
 ##########
 FROM builder-zig AS builder2
 

@@ -71,19 +71,19 @@ efi_ldflags = \
 
 # ------------------------------------------------------------------------------
 stub_headers = \
-	src/efi/util.h \
-	src/efi/pefile.h \
-	src/efi/linux.h
+	util.h \
+	pefile.h \
+	linux.h
 
 stub_sources = \
-	src/efi/util.c \
-	src/efi/pefile.c \
-	src/efi/linux.c \
-	src/efi/stub.c
+	util.c \
+	pefile.c \
+	linux.c \
+	stub.c
 
 
 stub_objects = $(addprefix $(out)/,$(stub_sources:.c=.o))
-stub_solib = $(out)/src/efi/stub.so
+stub_solib = $(out)/stub.so
 
 all: $(stub)
 
@@ -93,8 +93,8 @@ $(stub): $(stub_solib)
 	  -j .dynsym -j .rel -j .rela -j .reloc \
 	  --target=efi-app-$(ARCH) $< $@
 
-$(out)/src/efi/%.o: $(src)/src/efi/%.c $(addprefix $(src)/,$(stub_headers))
-	mkdir -p  $(out)/src/efi/
+$(out)/%.o: $(src)/%.c $(addprefix $(src)/,$(stub_headers))
+	mkdir -p  $(out)/
 	cc $(efi_cflags) -c $< -o $@
 
 $(stub_solib): $(stub_objects)
