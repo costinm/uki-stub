@@ -65,16 +65,34 @@ pub fn main() uefi.Status {
         log("Unable to allocate: {}", .{status});
         return .load_error;
     }
-    const cmdline_path = comptime toUcs2("\\EFI\\LINUX\\CMDLINE");
-    _ = loadFile(root_dir, &cmdline_path, cmdline_buffer, &cmd_size);
-    const cmd = cmdline_buffer[0..cmd_size];
-    log("Cmdline: {s} len={}", .{ cmd, cmd.len });
+
     var cmdx_buffer: [256]u16 = [_]u16{0} ** 256; // Buffer for UCS-2 conversion
-    const utf16_len: usize = 2 * cmd_size;
-    for (0..cmd_size) |i| {
-        cmdx_buffer[i] = cmdline_buffer[i];
+
+    const cmdline_path = comptime toUcs2("\\EFI\\LINUX\\CMDLINE");
+    status = loadFile(root_dir, &cmdline_path, cmdline_buffer, &cmd_size);
+    if (status != .success) {
+        log("Unable to load cmdline, using default: {}", .{status});
+        cmd_size = 0;
+        // All 'distro' kernels lack modules and require an initrd.
+        // A custom kernel can include the default cmdline and doesn't require
+        // a stub - can be used directly as BOOTx64.EFI.
+        // So default command is for initrd.
+        const cmd = "initrd=\\EFI\\LINUX\\INITRD.IMG root=LABEL=ROOTA loglevel=5 console=ttyS0,115200  console=tty1 ";
+        log("Default cmdline: {s} len={}", .{ cmd, cmd.len });
+
+        for (0..cmd_size) |i| {
+            cmdx_buffer[i] = cmdline_buffer[i];
+        }
+        cmdx_buffer[cmd_size + 1] = 0;
+    } else {
+        const cmd = cmdline_buffer[0..cmd_size];
+        log("Cmdline: {s} len={}", .{ cmd, cmd.len });
+
+        for (0..cmd_size) |i| {
+            cmdx_buffer[i] = cmdline_buffer[i];
+        }
+        cmdx_buffer[cmd_size + 1] = 0;
     }
-    cmdx_buffer[cmd_size + 1] = 0;
     // Free the buffer
     _ = boot_services.freePool(@alignCast(cmdline_buffer));
 
@@ -116,7 +134,7 @@ pub fn main() uefi.Status {
     }
 
     kloaded_image.load_options = @ptrCast(&cmdx_buffer);
-    kloaded_image.load_options_size = @intCast(utf16_len * 2);
+    kloaded_image.load_options_size = @intCast((cmd_size + 1) * 2);
 
     log("Unverified Linux startImage", .{});
 

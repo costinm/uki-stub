@@ -51,6 +51,8 @@ SECRETS=${SECRETS:-/var/run/secrets/uefi-keys}
 # Create unsigned EFI. This simply copies files to the right place for signing or
 # use without signature.
 unsigned() {
+  xcmd="$1"
+
   mkdir -p ${DEST}/EFI/LINUX ${DEST}/EFI/BOOT
 
   local cmd="console=tty1 loglevel=6 iomem=relaxed quiet net.ifnames=0 panic=5"
@@ -60,11 +62,11 @@ unsigned() {
     cmd="initrd=\\EFI\\LINUX\\INITRD.IMG $cmd"
   fi
 
-  if [ ! -f ${DEST}/EFI/LINUX/CMDLINE\ ]; then
-   echo $cmd  > ${DEST}/EFI/LINUX/CMDLINE
-  fi 
+  #if [ ! -f ${DEST}/EFI/LINUX/CMDLINE ]; then
+  echo "$cmd $xcmd"  > ${DEST}/EFI/LINUX/CMDLINE
+  #fi 
 
-  cp ${KERNEL}/boot/vmlinuz ${DEST}/EFI/LINUX/KERNEL.EFI
+  cp ${KERNEL} ${DEST}/EFI/LINUX/KERNEL.EFI
   cp ${STUB} ${DEST}/EFI/BOOT/BOOTx64.EFI
 }
 

@@ -137,18 +137,24 @@ If secure boot is enabled, the BIOS/firmware  will verify the signature on the E
 
 IMPORTANT: there is very little protection against physical access to a machine ('evil maid', or 'friends and family'). In few motherboards I was able to flash the bios
 with a cheap adapter - and disable the secure boot and reset the keys. An attacker
-can replace almost everything and install a logger that captures your password. 
+can replace almost everything, install a logger that captures your passwords, etc. 
 
 The main protection when 'verified boot' is enabled is in the TPM-protected keys,
-which can be configured to only be available in a certain configuration, with the user-owned keys and secure boot enabled. That in turn protects encrypted disks.
+which can be configured to only be available in a certain configuration, with the user-owned keys and secure boot enabled. That in turn protects encrypted disks, assuming
+the firmware and hardware are not compromised.
 
-There are still limits - but it is likely the best given the available hardware, 
-as long as user-owned PK, TPM/2, encrypted disk are all used.
+There are still limits - but it is likely the best given the available hardware and complexity of uEFI - as long as user-owned PK, TPM/2, encrypted disk are all used.
 
 In the vast majority of cases - you don't need all this. If the laptop is stolen, having
 an encrypted disk is good enough. Secure boot and TPM protects against a 'friend' 
-replacing the OS to capture the encryption key and password. 
+replacing the OS to capture the encryption key and password, which is trivial otherwise
+if they boot from a USB disk.
 
+So if your maid and friends know how to flash chips, use FPGAs - they'll probably 
+be able to replace the OS and may even unlock your data. Government or advanced attacks - they can but probably won't bother. 
+
+Keeping your private data and keys on a chromebook or phone is likely more secure - that's what I'm doing - but for a few servers I run and for fun I'm still using
+verified boot.
 
 ## Links and Others
 
@@ -174,11 +180,11 @@ github.com/u-root/u-root - initrd in go
 
 https://github.com/nrdmn/uefi-examples - uefi in zig
 
-## SBAT 
+## SBAT and other UKI specs
 
 SBAT is another complex spec - intended to revoke some components in the boot path, when the complex chainging of bootloader and kernels is used.
 
-The minimal UKI is NOT intended to be chained or used with another bootloader. There is only the EFI firmware and the one signed BOOT.EFI file. If user keys are compromised - they can simply rotate the keys (DB, KEK and PK) on all machines. Periodic rotations
+This project is NOT intended to be chained or used with another bootloader. There is only the EFI firmware and the one signed BOOT.EFI file. If user keys are compromised - they can simply rotate the keys (DB, KEK and PK) on all machines. Periodic rotations
 are also probably a good idea - but may be overkill. If one signed BOOT.EFI has a vulnerability and we want to prevent running it in future: generate a new signing key and update the hosts to use the new key and remove the old ones. It should be possible to do this with a custom EFI program - this is also the mitigation if the signing keys are compromised, rotating the signing keys would invalidate all older binaries.
 
 SBAT is useful if you leave the vendor (Microsoft,etc) public keys - which 
@@ -187,3 +193,7 @@ With the minimal stub - all other signing keys should be removed, only
 the user trusted key should be used, and rotated as needed, each user
 has their own key, on some secure build machine only.
 
+Most other specs around UKI and boot loaders - ask yourself is the complexity and risk
+associated with even more layers on top of the already complex uEFI is really worth it, 
+and if learning 10 more config formats and tools (that keep changing and are different 
+between distros) provide any real benefit to you.
