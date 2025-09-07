@@ -23,12 +23,16 @@ COPY --from=builder2 /out/img/ministub.efi /
 # the kernel image and the rootfs image. 
 FROM alpine:edge AS signer
 
+COPY --from=busybox:musl /bin/busybox /initrd/bin/busybox
+COPY --from=docker.io/jedisct1/minisign /usr/local/bin/minisign /initrd/bin/minisign
+
 COPY ./signer/sbin/setup-signer /sbin/
 
-RUN setup-signer add_builder
+RUN setup-signer add_signer
 
 COPY ./signer/sbin /sbin
 COPY ./signer/etc /etc
+COPY ./signer/initrd /initrd/
 
 VOLUME [ "/data" ]
 VOLUME [ "/config" ]

@@ -10,11 +10,12 @@ add_signer() {
   apk add  \
     efi-mkkeys sbsigntool \
     mkinitfs binutils  \
-    zstd tar \
-     uuidgen \
-     squashfs-tools cryptsetup dosfstools eudev
+    zstd tar e2fsprogs libarchive \
+     uuidgen openssh \
+     squashfs-tools cryptsetup dosfstools eudev minisign
       
   # tar - required for multiple -C for creating the sqfs.
+  # libarchive - optional dep of mk2efs
 
   # No longer used: efi-mkuki (forked, upstream no longer works - systemd )
   # gummiboot - forked 
@@ -24,24 +25,12 @@ add_signer() {
   
   echo 'disable_trigger=yes' >> /etc/mkinitfs/mkinitfs.conf
 
-}
-
-add_builder() {
-  apk add  \
-    efi-mkkeys sbsigntool \
-    mkinitfs binutils  \
-    zstd tar \
-     uuidgen \
-     squashfs-tools cryptsetup dosfstools eudev
-      
-  apk add zig
-  curl -L -O - https://github.com/usbarmory/tamago-go/releases/download/tamago-go1.25.0/tamago-go1.25.0.linux-amd64.tar.gz \
-    | tar xvfz -
-
-  # Udev used in initrd
-  
-  echo 'disable_trigger=yes' >> /etc/mkinitfs/mkinitfs.conf
+  if [ -f /initrd/bin/busybox ]; then
+    ls -l /initrd/bin
+    (chroot /initrd /bin/busybox --install -s /bin)
+  fi
 
 }
+
 
 "$@"

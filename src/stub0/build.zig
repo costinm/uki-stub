@@ -14,23 +14,24 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
     const exe = b.addExecutable(.{
-        .name = "ministub.efi",
+        .name = "BOOTx64.EFI",
         .root_module = main_module,
         .linkage = .static,
     });
-    
-    exe.addIncludePath(b.path("."));
 
-    const out_dir_name = "img";
+    const out_dir_name = "EFI/BOOT";
 
     const install = b.addInstallFile(
         exe.getEmittedBin(),
-        b.fmt("{s}/ministub.efi", .{out_dir_name}),
+        b.fmt("{s}/BOOTx64.EFI", .{out_dir_name}),
     );
 
     install.step.dependOn(&exe.step);
+
     b.getInstallStep().dependOn(&install.step);
     b.installArtifact(exe);
+
     b.default_step = &install.step;
 }

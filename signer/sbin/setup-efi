@@ -1,11 +1,11 @@
 #!/bin/sh
 
-# Setup for the UKI (signed kernel + initrd + signed configs/hashes).
-# Input: 
+# Setup for the UKI (signed kernel + signed configs including SHA256 for next stages).
+#
+# Input:
 # - /data/efi/initos - the directory with the initos.sqfs and sidecar.sqfs images
-# - The /config directory is expected to contain uefi-keys (will be created if missing) 
-# - /config/hosts - host specific configs - 'default' configs will be added.
-# 
+# - The /config directory is expected to contain uefi-keys (will be created if missing)
+#
 # Output:
 # - /data/efi/keys - the keys used to sign the images (to be added to host)
 # - /data/efi/EFI/BOOT/BOOTx64.EFI - the signed UKI image
@@ -17,8 +17,8 @@
 #
 # /boot, /lib/modules and /lib/firmware are expected to be mounted from another
 # image or disk, or part of the signer image.
-# 
-# Create the final disk by copying to the unused existing EFI partition - the active boot can't be 
+#
+# Create the final disk by copying to the unused existing EFI partition - the active boot can't be
 # changed, the files will be in use.
 
 set -x
@@ -29,165 +29,121 @@ set -e
 # Signing the images also requires a volume holding the signing keys
 # and configs.
 
-mkdir -p /data/efi/initos /data/efi/EFI/BOOT /data/efi/keys
+DATA=${DATA:-/data}
 
-STUB=/usr/lib/efi-stub/linux.efi.stub
-#STUB=/usr/lib/efi-stub/linuxx64.efi.stub
+# Expectes kernel to be mounted here - with ./boot, ./lib/modules, firmware
+KERNEL_DIR=${KERNEL_DIR:-/mnt/modloop}
+KERNEL=${KERNEL:-${KERNEL_DIR}/vmlinuz}
 
-# Sign will create the UKI signed, insecure and usb images.
-# It will also regenerate and sign the SQFS file, and add patches
-# to the UKI that will be used to configure the hosts, including 
-# a 'mesh root cert', authorized keys, common configs.
+OUT=${OUT:-/data/efi}
+DEST=${OUT}
+
+STUB=${STUB:-/usr/lib/efi-stub/ministub.efi}
+INITRD_SRC=${INITRD_SRC:-/initrd}
+
+
+# Hardcoded in stub - any change must be done in both places.
+kernel_offset='0x30000000'
+cfg_offset=0x20000000
+
+SECRETS=${SECRETS:-/var/run/secrets/uefi-keys}
+
+# Create unsigned EFI. This simply copies files to the right place for signing or
+# use without signature.
+unsigned() {
+  mkdir -p ${DEST}/EFI/LINUX ${DEST}/EFI/BOOT
+
+  local cmd="console=tty1 loglevel=6 iomem=relaxed quiet net.ifnames=0 panic=5"
+  
+  initrd=${DEST}/EFI/LINUX/INITRD.IMG
+  if [ -f ${initrd} ]; then
+    cmd="initrd=\\EFI\\LINUX\\INITRD.IMG $cmd"
+  fi
+
+  if [ ! -f ${DEST}/EFI/LINUX/CMDLINE\ ]; then
+   echo $cmd  > ${DEST}/EFI/LINUX/CMDLINE
+  fi 
+
+  cp ${KERNEL}/boot/vmlinuz ${DEST}/EFI/LINUX/KERNEL.EFI
+  cp ${STUB} ${DEST}/EFI/BOOT/BOOTx64.EFI
+}
+
+# EFI will generate a config including SHA256 of initrd (if any), kernel size and command line
 #
-# The patches can also be added to the SQFS file before signing.
-# They go to /opt/initos/local
-# 
-# It is intended to run from a container with /etc/uefi-keys mounted
-# to a disk on an encrypted partition or 'secrets', and /data
-# mounted with the destination disk, where efi image will be 
-# created. It can also be used from recovery.
+# The files are expected to be in ${OUT}/EFI/LINUX/{KERNEL.EFI,CMDLINE,INITRD.IMG}
+# If INITRD.IMG is missing - it is assumed the kernel has disk drivers and EXT4 support.
+#
+# A rootfs should be already created and dm-verity signed.
 efi() {
-  local variant=${1:-deb}
+  local xtra_cmd=${1:-}
 
-  local host=${2:-default}
-    
-  prepare ${variant}
-  
-  # Mounted dir
-  DEST=/data/efi
-  set -e
+  PUB=$(sed -n '2p' ${SECRETS}/minisign.pub)
+  mkdir -p ${DEST}/EFI/LINUX ${DEST}/EFI/BOOT
 
-  # Alpine expects keys on /etc/uefi-keys/{db.crt,db.key}
-  if [ ! -f /var/run/secrets/uefi-keys/db.crt ]; then
-    sign_init
-  else
-    cp -a /var/run/secrets/uefi-keys /etc
-  fi
-
-  mkdir -p ${DEST}/keys /local /data/efi-${variant}/EFI/BOOT
-
-  efi_keys
-
-  # If hash is missing, use verity to sign it now
-  # If making changes to the img (on the mounted disk), remove hash.recovery to force
-  # regeneration.
-
-  DIR=/data/initos-${variant}
-
-  # /local dir will be baked into the initrd and propagated. Include critical security files.
-  # Also add fresh scripts from the image.
-  cp ${DIR}/*.hash /local/ 
-  cp /etc/uefi-keys/authorized_keys /local/
-  cp /etc/uefi-keys/root.pem /local/
-  
-  if [ -d /config/local ]; then
-    cp -a /config/local/* /local/
-  fi
-
-  # | xxd -r -p 
-  cat ${DIR}/sidecar.hash | openssl dgst \
-    -sha256 -sign /etc/uefi-keys/root.key \
-    -out ${DIR}/sidecar.sig
-
-  # Per host local configs - go to /sysroot/var/initios/local/* in initrd (as backup) but 
-  # also get copied over /
-  # The /x/ dir 
-  cp -a /config/hosts/${host}/* /local/ || true
-  echo "Host specific files: ${host}"
-  ls -R /local 
-
-  INIT_PATCH=/tmp/initrd-patch.cpio.gz
-  (find /sbin/initos* /sbin/setup-initos* /local \
-   | sort  | cpio --quiet --renumber-inodes -o -H newc | gzip) > ${INIT_PATCH}
-
-  # Console on ttyS0: for headless servers
-  local cmd="rdinit=/sbin/initos-initrd net.ifnames=0 panic=5 "
-  # console=tty1
-  
-  KERNEL=/data/boot-${variant}/vmlinuz
-
-  #UCODE="/boot/intel-ucode.img /boot/amd-ucode.img"
-  UCODE=""
-  # Deb kernel is compiled with ucode included
-  # With the ucode - 2024-02-15
-
-  # console log level 2 (critical)
-  # default messages (no loglevel): 4 (warning)
-  # min console log level
-  # default console log level 7
-  # cmdline: loglevel=
-  #sysctl -w kernel.printk="2 4 1 7"
+  local cmd="pub_key=${PUB} console=tty1 loglevel=6 net.ifnames=0 panic=5 "
 
   # TODO: add a file an create another config.cpio - command line can be set by efibootmgr.
-  # Technically if the command line can be changed an attacker can also set rdinit=/bin/sh - the bootloader must 
+  # Technically if the command line can be changed an attacker can also set rdinit=/bin/sh - the bootloader must
   # be locked down and EFI restricted just like TPM
   # Main setting - iomem - allows flashing bios, etc.
 
-  echo "$cmd console=tty1 loglevel=1 quiet" > /tmp/cmdline
-  efi-mkuki \
-        -S ${STUB} \
-      -c /tmp/cmdline \
-      -o /tmp/InitOS-unsigned.EFI \
-        ${KERNEL} \
-        ${UCODE} /data/boot-${variant}/initos-initrd.img ${INIT_PATCH}
+  initrd=${INITRD:-${DEST}/EFI/LINUX/INITRD.IMG}
 
-  mkdir -p /data/efi-${variant}/EFI/BOOT
-  sbsign --cert /etc/uefi-keys/db.crt \
-      --key /etc/uefi-keys/db.key \
-      --output /data/efi-${variant}/EFI/BOOT/BOOTx64.EFI \
-       /tmp/InitOS-unsigned.EFI 
+  echo UKI >/tmp/ukicfg
+
+  # This is required if using startImage - but a security risk
+  # since the kernel can be extracted and used with random cmd
+  # 
+  # sbsign --cert ${SECRETS}/db.crt \
+  #   --key ${SECRETS}/db.key \
+  #   --output /tmp/kernel.signed.efi \
+  #   ${KERNEL}  
+  cp ${KERNEL} ${DEST}/EFI/LINUX/KERNEL.EFI
   
-  chmod -R 755 ${DEST}
-  rm -rf /etc/uefi-keys
-}
-
-
-# Create unsigned EFI.
-# 
-unsigned() {
-  local variant=${1:-deb}
-  # The init script will use 'the last console' if multiple are listed, not very useful.
-  # instead allow customization of the tty
-  local host=${2:-default}
+  cat ${KERNEL} | wc -c >>/tmp/ukicfg
+  sha256sum ${KERNEL} | cut -d" " -f 1 >>/tmp/ukicfg
   
-  DEST=/data/efi-unsigned-${variant}-${host}
-  set -e
-
-  prepare ${variant}
-
-  local cmd="rdinit=/sbin/initos-initrd net.ifnames=0 panic=5 "
-  
-  KERNEL=/data/boot-${variant}/vmlinuz
-
-  if [ -e /src/sidecar ]; then
-    cp -a /src/sidecar/sbin/* /sbin
+  if [ -f ${initrd} ]; then
+    cat ${initrd} | wc -c >>/tmp/ukicfg
+    sha256sum ${initrd} | cut -d" " -f 1 >>/tmp/ukicfg
+  else
+    echo 0 >> /tmp/ukicfg
+    echo 0 >> /tmp/ukicfg
   fi
 
-  INIT_PATCH=/tmp/initrd-patch.cpio.gz
-  (find /sbin/initos* /sbin/setup-initos* /local \
-   | sort  | cpio --quiet --renumber-inodes -o -H newc | gzip) > ${INIT_PATCH}
+  #echo "console=tty1 loglevel=1 quiet net.ifnames=0 panic=5" >>/tmp/ukicfg
+  echo "$cmd ${xtra_cmd}" >>/tmp/ukicfg
+  echo >>/tmp/ukicfg
 
+  cat /tmp/ukicfg
+
+  # Even if embedded, the kernel needs to be signed.
+  # Not clear why not let it on disk.
+  # Note that extracting the signed kernel is possible, and
+  # then it can be launched with a different command line from
+  # boot loader... So it seems this approach may not work so well.
+   
+  # TODO: the kernel and config can be loaded and checked, we only need a SHA
+  # and we could just link a public key and have the config signed.
+  objcopy \
+    --add-section .cfg="/tmp/ukicfg" --change-section-vma .cfg=$cfg_offset \
+    ${STUB} \
+    /tmp/InitOS-unsigned.EFI
+
+#--add-section .linux="${KERNEL}" --change-section-vma ".linux=$kernel_offset" \
+    
   mkdir -p ${DEST}/EFI/BOOT
-  
-  TTY=tty1
-  if [ "${host}" = "qemu" ]; then
-    TTY="ttyS0,115200"
-    cmd="$cmd initos_debug_initrd=1 initos_sidecar=/dev/sdb"
-  fi
 
-  echo "$cmd console=${TTY} iomem=relaxed  loglevel=6 debug_init - example" > /tmp/cmdline
+  sbsign --cert ${SECRETS}/db.crt \
+    --key ${SECRETS}/db.key \
+    --output ${DEST}/EFI/BOOT/BOOTx64.EFI \
+    /tmp/InitOS-unsigned.EFI
   
-  efi-mkuki \
-        -S ${STUB} \
-        -c /tmp/cmdline \
-        -o ${DEST}/EFI/BOOT/BOOTx64.EFI \
-          ${KERNEL} \
-          /data/boot-${variant}/initos-initrd.img \
-          ${INIT_PATCH}
+  ls -l ${DEST}/EFI/BOOT ${DEST}/EFI/LINUX
 
-  ls -l ${STUB} ${KERNEL} /data/boot-${variant}/initos-initrd.img ${DEST}/EFI/BOOT/BOOTx64.EFI
-  cat /tmp/cmdline
+  chmod -R 755 ${DEST}
 }
+
 
 # Generate the key pairs for signing the kernel and the disk image.
 # This is done before install - as a separate step/process - the rest can be automated easily,
@@ -195,76 +151,38 @@ unsigned() {
 sign_init() {
   local u=${DOMAIN:-mesh.internal}
 
-  efi-mkkeys -s ${u} -o /etc/uefi-keys
+  SECRETS=${SECRETS:-/var/run/secrets/uefi-keys}
 
-  # Generate a 'mesh root' - both SSH and https.  
+  if [ -f ${SECRETS}/root.key ] ; then
+    echo "Keys already exist"
+    return 0
+  fi
+
+  efi-mkkeys -s ${u} -o ${SECRETS}
+
+  # Generate a 'mesh root' - both SSH and https.
   # Will be bundled on all signed images, and used to encrypt the LUKS pass.
   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
-     -out /etc/uefi-keys/root.key
+    -out ${SECRETS}/root.key
 
-  openssl ec -in /etc/uefi-keys/root.key -pubout -out \
-     /etc/uefi-keys/root.pem
-  
-  ssh-keygen -y -f /etc/uefi-keys/root.key > \
-     /etc/uefi-keys/authorized_keys
+  openssl ec -in ${SECRETS}/root.key -pubout -out \
+    ${SECRETS}/root.pem
 
+  ssh-keygen -y -f ${SECRETS}/root.key > ${SECRETS}/authorized_keys
 
-  echo "Generating new root keys for signing and mesh"
-  cat /etc/uefi-keys/authorized_keys
+  minisign -GW -s ${SECRETS}/minisign.key -p ${SECRETS}/minisign.pub
+  PUB=$(sed -n '2p' ${SECRETS}/minisign.pub)
 
-  cp -a /etc/uefi-keys /var/run/secrets
+  echo $PUB
+  #cat ${SECRETS}/minisign.pub
+
+  cat ${SECRETS}/authorized_keys
 }
 
-# Copy the efi keys to the EFI partition
-efi_keys() {
-  DEST=/data/efi
-
-  cp /etc/uefi-keys/*.auth ${DEST}/keys
-  cp /etc/uefi-keys/*.cer ${DEST}/keys
-  cp /etc/uefi-keys/*.crt ${DEST}/keys
-}
-
-# Build the initramfs for the real kernel
-# Expectes /boot, /lib/modules, /lib/firmware to have the right
-# mounts and /boot/version to hold the desired kernel version.
-# 
-# This runs in an alpine container (for now) - the init will be based
-# on the lighter musl binaries.
-build_initrd() {
-  local destdir=${1:-/data/boot/}
-
-  local VER=$(cat /boot/version)
-  local img=${destdir}/initos-initrd.img
-  mkdir -p ${destdir}
-
-  [ ! -f /lib/modules/${VER}/modules.dep ] && echo "Missing modules" && return
-
-    # Uses mkinitfs.conf added from file in the docker image.
-    # Other options: virtio, squashfs, 9p, raid, cdrom, lvm, ext4, kms (video)
-
-    # -k - keep the file
-    # -t - temp dir where all is stored
-    # -i - what init file to use - replace default with our script.
-
-    cp /etc/passwd /usr/share/mkinitfs/passwd
-    cp /etc/group /usr/share/mkinitfs/group
-
-    cp /boot/vmlinuz-${VER} ${destdir}/vmlinuz
-
-    kernel_version=$(cat /boot/version) # Created on download
-
-    rm -rf ${destdir}/initrd
-    
-    mkinitfs -i /sbin/initos-initrd \
-      -t ${destdir}/initrd -k \
-      -F "ata base keymap mmc nvme scsi usb cryptsetup squashfs ext4 initos eudev" \
-      -o ${img} $VER
-}
-
-# Creat a sqfs under $1 with the name $2, containing all files in this 
-# container. 
+# Creat a sqfs under $1 with the name $2, containing all files in this
+# container.
 #
-# Another way is to export (pull and export or using crane) and create 
+# Another way is to export (pull and export or using crane) and create
 # the sqfs externally.
 sqfs() {
   local DIR=${1:-/data/initos}
@@ -276,7 +194,6 @@ sqfs() {
   #  sh -c 'tar -cf - -C ${A} .' | \
   #   sqfstar ${WORK}/vimg/virt.sqfs -e .dockerenv
 
-
   # Excluding boot from the sqfs (kernel remains on the image and is used to build
   # the EFI, but no need to add a copy)
   # However ./the cloud kernel is needed for VM
@@ -285,21 +202,11 @@ sqfs() {
   rm -f ${DIR}/${name}.*
 
   cd /mnt/modloop
-  
+
   # Busybox tar does not support this.
-  tar cf - -C /mnt/modloop lib/modules lib/firmware boot -C /mnt/sidecar . | \
-    mksquashfs - ${DIR}/${name}.sqfs -tar -noappend   \
-     -regex \
-     -e "x/.*" \
-     -e "etc/uefi-keys" \
-     -e ".dockerenv" \
-     -e "data/.*" \
-     -e "proc/.*" \
-     -e "sys/.*" \
-     -e "run/.*" \
-     -e "tmp/.*" \
-     -e "var/cache/apt/.*" \
-     -e "etc/apk/cache.*"
+  tar cf - -C /mnt/modloop lib/modules lib/firmware boot -C /mnt/sidecar . |
+    mksquashfs - ${DIR}/${name}.sqfs -tar -noappend 
+     
   ls -l ${DIR}/${name}.sqfs
 
   echo "Created ${DIR}/${name}.sqfs"
@@ -314,67 +221,72 @@ sqfs() {
   # dm-mod.create="verity,,,ro,0 131072 verity 1 /dev/mmcblk0p1 /dev/mmcblk0p2 4096 4096 16384 1 sha256 \
   #             b96a69664f9279857931dbf64f942caf909076e40fd5bd5ed8d30b53ff922941 \
   #             2a4c7638f03b92bdb92d7284a742e0c4407c9ef65fdf2a7ea78ed02fde4a518b 1 ignore_zero_blocks"
-# dm-mod.create="<name>,<uuid>,<minor>,<flags>,[dm_table_params {dm_verity_params}]"
+  #
+  # dm-mod.create="<name>,<uuid>,<minor>,<flags>,[dm_table_params {dm_verity_params}]"
+  # dm_table_params="<start_sector> <num_sectors> <target_type> <dm_verity_params>"
+  # dm_verity_params="<version> <dev> <hash_dev> <data_block_size> <hash_block_size> <num_data_blocks> \
+  #                       <hash_start_block> <algorithm> <digest> <salt> [<#opt_params> <opt_params>]"
 
-# Where dm_table_params="<start_sector> <num_sectors> <target_type> <dm_verity_params>"
-
-# And dm_verity_params="<version> <dev> <hash_dev> <data_block_size> <hash_block_size> <num_data_blocks> \
-#                       <hash_start_block> <algorithm> <digest> <salt> [<#opt_params> <opt_params>]"
-
-  # TODO: check if older 
+  # TODO: check if older
   veritysetup format --data-block-size=4096 --hash-block-size=4096 \
     --root-hash-file=${DIR}/${name}.hash \
     ${DIR}/${name}.sqfs \
     ${DIR}/${name}.sqfs.verity
 }
 
-# Creat a sqfs under $1 with the name $2, containing all files in this 
-# container. 
+
+# Build the initramfs with modules for a non-custom kernel lacking storage drivers.
 #
-# Another way is to export (pull and export or using crane) and create 
-# the sqfs externally.
-sqfs_self() {
-  local DIR=${1:-/data/efi/initos}
-  local name=${2:-sidecar}
+# Expectes /boot, /lib/modules, /lib/firmware to have the right
+# mounts and /boot/version to hold the desired kernel version.
+#
+# This runs in an alpine container - the init will be based
+# on the musl binaries plus minisign.
+build_initrd() {
+  local destdir=${1:-/data/boot/}
 
-  # -one-file-system also works on the host - but not so well in a container.
+  local VER=$(cat /boot/version)
+  local img=${destdir}/initos-initrd.img
+  mkdir -p ${destdir}
 
-  # buildah unshare -m A=debui -- \
-  #  sh -c 'tar -cf - -C ${A} .' | \
-  #   sqfstar ${WORK}/vimg/virt.sqfs -e .dockerenv
+  [ ! -f /lib/modules/${VER}/modules.dep ] && echo "Missing modules" && return
 
-  #alpine_clear
+  # Uses mkinitfs.conf added from file in the docker image.
+  # Other options: virtio, squashfs, 9p, raid, cdrom, lvm, ext4, kms (video)
 
-  # Excluding boot from the sqfs (kernel remains on the image and is used to build
-  # the EFI, but no need to add a copy)
-  # However ./the cloud kernel is needed for VM
+  # -k - keep the file
+  # -t - temp dir where all is stored
+  # -i - what init file to use - replace default with our script.
+  #  -F "ata base keymap mmc nvme scsi usb cryptsetup squashfs ext4 initos eudev" \
 
-  mkdir -p ${DIR}
-  rm -f ${DIR}/${name}.*
+  rm -rf ${destdir}/initrd
+  mkinitfs -i /sbin/initos-initrd \
+    -t ${destdir}/initrd -k \
+    -F "ata base keymap mmc nvme scsi usb cryptsetup squashfs ext4 initos eudev" \
+    -o ${img} $VER
+}
 
-  cd /
+patch_initrd() {
+  INIT_PATCH=/tmp/initrd-patch.cpio.gz
+  (find /local |
+    sort | cpio --quiet --renumber-inodes -o -H newc | gzip) >${INIT_PATCH}
+}
 
-  mksquashfs . ${DIR}/${name}.sqfs \
-     -noappend \
-     -regex \
-     -e "x/.*" \
-     -e "etc/uefi-keys" \
-     -e ".dockerenv" \
-     -e "data/.*" \
-     -e "proc/.*" \
-     -e "sys/.*" \
-     -e "run/.*" \
-     -e "tmp/.*" \
-     -e "var/cache/apt/.*" \
-     -e "etc/apk/cache.*"
-    
-  echo "Created ${DIR}/${name}.sqfs"
+base_initrd() {
+  mkdir -p ${DEST}/EFI/LINUX ${DEST}/EFI/BOOT
+  if [ -d /ws/signer ]; then
+    cp -a /ws/signer/initrd/* /initrd
+  fi  
+  INITRD=${DEST}/EFI/LINUX/INITRD.IMG
+  (cd ${INITRD_SRC:-/initrd} && find |
+    sort | cpio --quiet --renumber-inodes -o -H newc | gzip) >${INITRD}
+
 }
 
 
 # Make sure the initrd.img and sidecar.sqfs files exist.
 # They are used for creating the EFI file.
-# 
+#
 # The files are created on the /data dir
 prepare() {
   local variant=${1:-deb}
@@ -407,8 +319,7 @@ prepare() {
   fi
 }
 
-
-if [ -z ${1+x} ] ; then
+if [ -z ${1+x} ]; then
   efi
 else
   "$@"

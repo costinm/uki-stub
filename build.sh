@@ -13,11 +13,13 @@
 set -e
 
 # Build configuration
-BASH_SRC=$0 #{BASH_SOURCE[0]}
-BASE=$(dirname "${BASH_SRC}")
+BASE=$(dirname "$0")
 PROJECT_ROOT="$(cd "${BASE}" && pwd)"
-#BUILD_DIR=${BUILD_DIR:-"${PROJECT_ROOT}/build"}
-BUILD_DIR=${HOME}/.cache/$(basename ${PROJECT_ROOT})
+SRC=${PROJECT_ROOT}
+PROJECT=$(basename ${PROJECT_ROOT})
+
+BUILD_DIR=${HOME}/.cache/${PROJECT}
+
 export ZIG_LOCAL_CACHE_DIR=${BUILD_DIR}/.zig-cache
 
 # QEMU configuration
@@ -28,11 +30,11 @@ MOUNT_DIR="${BUILD_DIR}/mnt"
 kernel_offset='0x30000000' 
 cfg_offset=0x20000000
 
-mkdir -p "${BUILD_DIR}"
+#mkdir -p "${BUILD_DIR}"
 
 build() {
-    (cd src/stub2 && zig build -p ${BUILD_DIR} -freference-trace=8)
-    cp ${BUILD_DIR}/img/ministub.efi prebuilt/uki-stub.efi
+    local dir=${1:-src/stub2}
+    (cd ${dir} && zig build -p ${BUILD_DIR} -freference-trace=8)
 }
 
 buildr() {
@@ -40,26 +42,10 @@ buildr() {
     cp src/stub2g/target/x86_64-unknown-uefi/debug/uki-stub.efi prebuilt/uki-stub.efi
 }
 
-# Generate BOOTx64.EFI
-gen() {
-    local FATDIR=${1}
-    local CFG=${2}
-
-    mkdir -p ${FATDIR}/EFI/BOOT ${FATDIR}/EFI/LINUX
-
-    #cp /x/linux/linux-6.16/arch/x86/boot/bzImage prebuilt/vmlinuz-custom
-    # Config can specify 0 as kernel size, stub will load from this fixed location
-    #cp prebuilt/vmlinuz-custom ${BUILD_DIR}/qemu/EFI/LINUX/kernel.efi
-    
-    objcopy \
-        --add-section .cfg="${CFG}" --change-section-vma .cfg=$cfg_offset \
-        --add-section .linux="prebuilt/vmlinuz-custom"     --change-section-vma ".linux=$kernel_offset"  \
-            prebuilt/uki-stub.efi \
-            ${FATDIR}/EFI/BOOT/bootx64.efi
-}
-
 run_qemu() {    
     FATDIR=${1}
+    local SECURE=${2:-0}
+
     #readpe ${BUILD_DIR}/efi-verify-stub.efi
     #readpe ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
 
@@ -69,63 +55,171 @@ run_qemu() {
 
 # -drive file=nvm.img,if=none,id=nvm
 # -device nvme,serial=deadbeef,drive=nvm
+#-bios "${OVMF_PATH}" \
 
-    qemu-system-x86_64 \
-        -nodefaults \
-        -bios "${OVMF_PATH}" \
-        -m 1G -smp 2 \
+#        -drive if=pflash,format=raw,file=prebuilt/OVMF_2M.fd \
+    # Using a debian 2.7.0 UEFI, 2M + vars    
+#-boot menu=on \
+
+    OVMF="-drive if=pflash,format=raw,file=prebuilt/OVMF.fd"
+    if [ ${SECURE} -eq 1 ]; then
+        OVMF="${OVMF} --drive if=pflash,format=raw,file=prebuilt/OVMF_VARS.fd"
+    fi
+
+    qemu_base="-m 1G -smp 4 -cpu host -enable-kvm"
+    #qemu_common="${qemu_base} -display none"
+    qemu_common="${qemu_base} -nographic"
+    #qemu_common="${qemu_base} -display gtk -vga std"
+
+    # On reboot - exists, let caller to restart
+    qemu_common="${qemu_common} -no-reboot"
+
+    #qemu_serial="-serial stdio"
+    qemu_serial="-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0" 
+    # stdio - no input ?
+    # mon:stdio - C-a xa
+	# -display none -serial stdio
+
+    
+    qemu-system-x86_64 -nodefaults ${qemu_common} \
+        ${qemu_serial} \
         -drive file=fat:rw:${FATDIR},format=raw \
         -drive file=prebuilt/sidecar.sqfs,format=raw \
-        -net none \
-        -nographic \
-        -enable-kvm -cpu host \
-        -no-reboot \
-        -chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0 
-
+         ${OVMF} \
+        -net user,hostfwd=tcp::10022-:22 
+ 
+    # user mode network defaults:
+    # 10.0.2.2, DNS 10.0.2.3
 }
 
 
-# Verified boot - SHA256 of the initrd included
-ver() {
+# Verified boot with initrd.
+secure() {
     cfg=${1:-prebuilt/cfg.qemu}
     build
+    cp ${BUILD_DIR}/img/ministub.efi prebuilt/uki-stub.efi
 
-    gen ${BUILD_DIR}/qemu ${cfg}
-    cp prebuilt/initrd.img ${BUILD_DIR}/qemu/EFI/LINUX/initrd.img
+    [ -f prebuilt/testdata/uefi-keys/db.key ] || init_secrets ${SRC}/prebuilt/testdata
+
+    cctl run ${PROJECT} \
+        -e KERNEL_DIR=/ws/prebuilt/boot \
+        -e STUB=/ws/prebuilt/uki-stub.efi \
+        --entrypoint /ws/signer/sbin/setup-efi \
+            signer base_initrd
+
+    SECRETS=${SRC}/prebuilt/testdata \
+        cctl run ${PROJECT} \
+            -e KERNEL_DIR=/ws/prebuilt/boot \
+            -e STUB=/ws/prebuilt/uki-stub.efi \
+            --entrypoint /ws/signer/sbin/setup-efi \
+                signer efi "console=ttyS0,115200"
+                
+                
+    # initrd=\\EFI\\LINUX\\INITRD.IMG if using the new protocol 
+    # rdinit=/bin/sh - to debug the initrd
+
+
     #echo "Adjust vma"
     # This corrects putting sections below the base image of the stub.
-    objcopy --adjust-vma 0  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-    run_qemu ${BUILD_DIR}/qemu
+    #objcopy --adjust-vma 0  ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
+    run_qemu ${BUILD_DIR}/efi 1
 }
 
-# Unverified/install mode
-unv() {
+# Install and test environment
+# 
+# The 'signer' docker image expects:
+# /data - the work directory. Some files may be already present - like efi/EFI/LINUX/INITRD.IMG
+# /mnt/modloop - an mounted image containing vmlinux and modules
+# /var/run/secrets - if SECRETS env var is set, will contain signing keys
+# /ws - current dir, optional. If present it can avoid rebuilding the image.
+# 
+# The script - /sbin/setup-efi - will use few env variables to allow other
+# locations to be used for KERNEL, STUB
+
+secure_noinitrd() {
     cfg=${1:-prebuilt/cfg.qemu}
     build
+    cp ${BUILD_DIR}/img/ministub.efi prebuilt/uki-stub.efi
 
-    mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX ${BUILD_DIR}/qemu-unv/EFI/BOOT
-    cp prebuilt/initrd.img ${BUILD_DIR}/qemu-unv/EFI/LINUX/initrd.img
-    cp prebuilt/cmdline.qemu ${BUILD_DIR}/qemu-unv/EFI/LINUX/cmdline
-    cp prebuilt/vmlinuz-custom ${BUILD_DIR}/qemu-unv/EFI/LINUX/kernel.efi
-    cp  ${BUILD_DIR}/img/ministub.efi ${BUILD_DIR}/qemu-unv/EFI/BOOT/bootx64.efi
+    [ -f prebuilt/testdata/uefi-keys/db.key ] || init_secrets ${SRC}/prebuilt/testdata
 
-    run_qemu ${BUILD_DIR}/qemu-unv
-}
-
-unvr() {
-    cfg=${1:-prebuilt/cfg.qemu}
-    buildr
-
-    mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX ${BUILD_DIR}/qemu-unv/EFI/BOOT
-    
-    cp prebuilt/initrd.img ${BUILD_DIR}/qemu-unv/EFI/LINUX/initrd.img
-    cp prebuilt/cmdline.qemu ${BUILD_DIR}/qemu-unv/EFI/LINUX/cmdline
-    cp prebuilt/vmlinuz-custom ${BUILD_DIR}/qemu-unv/EFI/LINUX/kernel.efi
+    SECRETS=${SRC}/prebuilt/testdata \
+        cctl run ${PROJECT} \
+            -e INITRD=NONE \
+            -e KERNEL=/ws/prebuilt/boot/vmlinuz \
+            -e STUB=/ws/prebuilt/uki-stub.efi \
+            --entrypoint /ws/signer/sbin/setup-efi \
+                signer efi "console=ttyS0,115200"
                 
-    cp  prebuilt/uki-stub.efi ${BUILD_DIR}/qemu-unv/EFI/BOOT/bootx64.efi
+    run_qemu ${BUILD_DIR}/efi 1
+}
+
+# The base initrd - busybox + script.
+initrd() {
+    # cctl script starts a container using .cache/PROJECT as /data and
+    # current dir as /ws 
+    cctl run ${PROJECT} --entrypoint /ws/signer/sbin/setup-efi \
+       signer base_initrd
+    
+    cp ${BUILD_DIR}/efi/EFI/LINUX/INITRD.IMG prebuilt/initrd.img
+}
+
+# Init the keys.
+init_secrets() {
+    local dir=${1:-${HOME}/.ssh/uefi-keys}
+
+    # cctl script starts a container using .cache/PROJECT as /data and
+    # current dir as /ws 
+    SECRETS=${dir} \
+    cctl run ${PROJECT} \
+      --entrypoint /ws/signer/sbin/setup-efi \
+         signer sign_init
+}
+
+sign() {
+    # cctl script starts a container using .cache/PROJECT as /data and
+    # current dir as /ws 
+    SECRETS=${HOME}/.ssh/uefi-keys \
+      cctl run ${PROJECT} \
+        --entrypoint /ws/signer/sbin/setup-efi \
+           signer efi
+
+         
+}
+
+# Unverified/install mode, with initrd. For unverified always using initrd.
+unv() {
+    build src/stub0
+
+    mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX
+
+    initrd
+    cp prebuilt/initrd.img ${BUILD_DIR}/qemu-unv/EFI/LINUX/INITRD.IMG
+
+    cp ${HOME}/.ssh/uefi-keys/uefi-keys/*.cer ${BUILD_DIR}/qemu-unv
+    cp ${HOME}/.ssh/uefi-keys/uefi-keys/*.esl ${BUILD_DIR}/qemu-unv
+    cp ${HOME}/.ssh/uefi-keys/uefi-keys/*.crt ${BUILD_DIR}/qemu-unv
+
+    OUT=${BUILD_DIR}/qemu-unv \
+    KERNEL_DIR=${SRC}/prebuilt \
+    STUB=${BUILD_DIR}/EFI/BOOT/BOOTx64.EFI \
+       ./signer/sbin/setup-efi unsigned
+
+    rm ${BUILD_DIR}/qemu-unv/EFI/BOOT/BOOTx64.EFI
+
+
+
+    #mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX ${BUILD_DIR}/qemu-unv/EFI/BOOT
+    #cp prebuilt/vmlinuz ${BUILD_DIR}/qemu-unv/EFI/LINUX/kernel.efi
+    #cp  ${BUILD_DIR}/img/ministub.efi ${BUILD_DIR}/qemu-unv/EFI/BOOT/bootx64.efi
+
+
+    # Overwrite the comand line to use ttyS0
+    cp prebuilt/cmdline.qemu ${BUILD_DIR}/qemu-unv/EFI/LINUX/CMDLINE
 
     run_qemu ${BUILD_DIR}/qemu-unv
 }
+
 
 
 "$@"
