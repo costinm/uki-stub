@@ -113,26 +113,24 @@ pub fn main() uefi.Status {
     const kernel_image_path = toUcs2("\\EFI\\LINUX\\KERNEL.EFI");
     var kernelBuf: [*]align(4096) u8 = undefined;
 
-    if (kernelLength > 0) {
-        kernelBuf = @ptrFromInt(@intFromPtr(selfLoadedImage.image_base + 0x20000000));
-        const pages_needed: usize = @intCast(1 + @divTrunc((kernelLength + 0xfff), 0x1000));
-        status = boot_services.allocatePages(.allocate_max_address, .loader_data, pages_needed, &kernelBuf);
-        if (status != .success) {
-            return fatal(status, "Unable to allocate: {}", .{status});
-        }
-
-        var rdKernelLen: usize = @intCast(kernelLength);
-        status = loadFile(root_dir, &kernel_image_path, kernelBuf, &rdKernelLen);
-        if (status != .success) {
-            return fatal(status, "Unable to load kernel: {}", .{status});
-        }
-
-        status = checkSha(kernelBuf, rdKernelLen, kernelSha);
-        if (status != .success) {
-            return fatal(status, "Unable to verify kernel SHA: {}", .{status});
-        }
-        log("Loaded and checked kernel {} {*}", .{ rdKernelLen, kernelBuf });
+    kernelBuf = @ptrFromInt(@intFromPtr(selfLoadedImage.image_base + 0x20000000));
+    const pages_needed: usize = @intCast(1 + @divTrunc((kernelLength + 0xfff), 0x1000));
+    status = boot_services.allocatePages(.allocate_max_address, .loader_data, pages_needed, &kernelBuf);
+    if (status != .success) {
+        return fatal(status, "Unable to allocate: {}", .{status});
     }
+
+    var rdKernelLen: usize = @intCast(kernelLength);
+    status = loadFile(root_dir, &kernel_image_path, kernelBuf, &rdKernelLen);
+    if (status != .success) {
+        return fatal(status, "Unable to load kernel: {}", .{status});
+    }
+
+    status = checkSha(kernelBuf, rdKernelLen, kernelSha);
+    if (status != .success) {
+        return fatal(status, "Unable to verify kernel SHA: {}", .{status});
+    }
+    log("Loaded and checked kernel {} {*}", .{ rdKernelLen, kernelBuf });
 
     if (true) {
         status = linuxExec(selfHandle, kernelCmdLine, @intFromPtr(kernelBuf), @intFromPtr(initrdBuf), initrdLen);
@@ -141,60 +139,62 @@ pub fn main() uefi.Status {
         }
     }
 
-    // const kernelAddr: [*:0]const u8 = @ptrFromInt(@intFromPtr(selfLoadedImage.image_base + 0x30000000));
+    const kernelAddr: [*]align(4096) u8 = kernelBuf; // @ptrFromInt(@intFromPtr(selfLoadedImage.image_base + 0x30000000));
     // log("{*} {*}", .{ kernelAddr, kernelBuf });
-    // var kimage: ?uefi.Handle = undefined;
-    // var buffer: [1000]u8 = undefined;
-    // var fba = std.heap.FixedBufferAllocator.init(&buffer);
-    // const allocator = fba.allocator();
-    // const kernelDevicePath = rootDevicePath.create_file_device_path(allocator, &kernel_image_path) catch |err| {
-    //     log("Error creating device path: {}", .{err});
-    //     return .invalid_parameter;
-    // };
-    // log("kLinePath {any}", .{kernelDevicePath});
 
-    // cmdx_buffer[utf16_len] = 0;
-    // status = boot_services.loadImage(true, selfHandle, kernelDevicePath, kernelAddr, @intCast(kernelLength), &kimage);
-    // log("Loading of embedded Linux: (mem) {}", .{status});
-    // if (status != .success) {
-    //     log("Unable to load kernel.efi: {}", .{status});
-    //     _ = boot_services.stall(30 * 1000 * 1000);
-    //     return .load_error;
-    // }
+    var kimage: ?uefi.Handle = undefined;
+    var buffer: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    const kernelDevicePath = rootDevicePath.create_file_device_path(allocator, &kernel_image_path) catch |err| {
+        log("Error creating device path: {}", .{err});
+        return .invalid_parameter;
+    };
+    log("kLinePath {any}", .{kernelDevicePath});
 
-    // var kloaded_image: *uefi.protocol.LoadedImage = undefined;
-    // status = boot_services.openProtocol(
-    //     kimage.?,
-    //     &uefi.protocol.LoadedImage.guid,
-    //     @ptrCast(&kloaded_image),
-    //     kimage,
-    //     null,
-    //     .{ .get_protocol = true },
-    // );
-    // if (status != .success) {
-    //     log("Error getting kernel loadedImageProtocol handle: {}", .{status});
-    //     _ = boot_services.stall(3 * 1000 * 1000);
-    //     return status;
-    // }
+    cmdx_buffer[utf16_len] = 0;
+    status = boot_services.loadImage(true, selfHandle, kernelDevicePath, kernelAddr, @intCast(kernelLength), &kimage);
+    log("Loading of embedded Linux: (mem) {}", .{status});
+    if (status != .success) {
+        log("Unable to load kernel.efi: {}", .{status});
+        _ = boot_services.stall(30 * 1000 * 1000);
+        return .load_error;
+    }
+
+    var kloaded_image: *uefi.protocol.LoadedImage = undefined;
+    status = boot_services.openProtocol(
+        kimage.?,
+        &uefi.protocol.LoadedImage.guid,
+        @ptrCast(&kloaded_image),
+        kimage,
+        null,
+        .{ .get_protocol = true },
+    );
+    if (status != .success) {
+        log("Error getting kernel loadedImageProtocol handle: {}", .{status});
+        _ = boot_services.stall(3 * 1000 * 1000);
+        return status;
+    }
 
     // // Convert runtime string to UCS-2
 
-    // kloaded_image.load_options = @ptrCast(&cmdx_buffer);
-    // kloaded_image.load_options_size = @intCast(utf16_len * 2);
+    kloaded_image.load_options = @ptrCast(&cmdx_buffer);
+    kloaded_image.load_options_size = @intCast(utf16_len * 2);
 
     // log("Execution of embedded Linux image with options: {s}", .{kernelCmdLine});
 
-    // status = boot_services.startImage(kimage.?, null, null);
+    status = boot_services.startImage(kimage.?, null, null);
 
-    // log("Execution of embedded Linux image failed: {}", .{status});
+    log("Execution of embedded Linux image failed: {}", .{status});
 
-    // _ = boot_services.stall(30 * 1000 * 1000);
+    _ = boot_services.stall(30 * 1000 * 1000);
     return status;
 }
 
 const c = @cImport({
-    @cInclude("linux.h"); // Include the C header if you have one
+    @cInclude("linux.h");
 });
+
 // Linux boot structures and constants
 const SETUP_MAGIC: u32 = 0x53726448; // "HdrS"
 const SetupHeader = c.SetupHeader;

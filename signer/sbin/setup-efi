@@ -206,9 +206,19 @@ sqfs() {
   cd /mnt/modloop
 
   # Busybox tar does not support this.
-  tar cf - -C /mnt/modloop lib/modules lib/firmware boot -C /mnt/sidecar . |
-    mksquashfs - ${DIR}/${name}.sqfs -tar -noappend 
-     
+  tar cf - -C /mnt/modloop lib/modules lib/firmware boot -C /mnt/sidecar . | \
+    mksquashfs -comp gzip -no-exports -no-fragments -no-duplicates -all-root - ${DIR}/${name}.sqfs -tar -noappend   \
+     -regex \
+     -e "x/.*" \
+     -e "etc/uefi-keys" \
+     -e ".dockerenv" \
+     -e "data/.*" \
+     -e "proc/.*" \
+     -e "sys/.*" \
+     -e "run/.*" \
+     -e "tmp/.*" \
+     -e "var/cache/apt/.*" \
+     -e "etc/apk/cache.*"
   ls -l ${DIR}/${name}.sqfs
 
   echo "Created ${DIR}/${name}.sqfs"
@@ -274,6 +284,22 @@ patch_initrd() {
     sort | cpio --quiet --renumber-inodes -o -H newc | gzip) >${INIT_PATCH}
 }
 
+
+mkinitramfs() {
+  local base=$1
+  local out=$2
+  (cd $base && find |
+    sort | cpio --quiet --renumber-inodes -o -H newc | gzip) > ${out}
+}
+
+unmkinitramfs() {
+  local f=$1
+  local out=$2
+  mkdir -o $out
+  
+  gzip -dc $f | (cd $out; cpio -i --no-absolute-filenames --quiet  ) 
+}
+
 base_initrd() {
   mkdir -p ${DEST}/EFI/LINUX ${DEST}/EFI/BOOT
   if [ -d /ws/signer ]; then
@@ -283,6 +309,14 @@ base_initrd() {
   (cd ${INITRD_SRC:-/initrd} && find |
     sort | cpio --quiet --renumber-inodes -o -H newc | gzip) >${INITRD}
 
+}
+
+booster_initrd() {
+  ln -s /mnt/modloop/lib/modules /lib/modules
+  ln -s /mnt/modloop/lib/firmware /lib/firmware
+  
+  # 23M
+  booster build -f --universal /data/initrd.booster.img --kernel-version=$(cat /mnt/modloop/boot/version)
 }
 
 

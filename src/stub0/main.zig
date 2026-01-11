@@ -1,6 +1,8 @@
 const uefi = @import("std").os.uefi;
 const std = @import("std");
 
+var boot_services: *uefi.tables.BootServices = undefined;
+
 // The actual entry point is EfiMain. EfiMain takes two parameters, the
 // EFI image's handle and the EFI system table, and writes them to
 // uefi.handle and uefi.system_table, respectively. The EFI system table
@@ -9,8 +11,9 @@ const std = @import("std");
 // main() can return void or usize.
 pub fn main() uefi.Status {
     con_out = uefi.system_table.con_out.?;
-    const boot_services = uefi.system_table.boot_services.?;
+    boot_services = uefi.system_table.boot_services.?;
     const selfHandle = uefi.handle;
+
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -78,7 +81,7 @@ pub fn main() uefi.Status {
         // a stub - can be used directly as BOOTx64.EFI.
         // So default command is for initrd.
         const cmd = "initrd=\\EFI\\LINUX\\INITRD.IMG root=LABEL=ROOTA loglevel=5 console=ttyS0,115200  console=tty1 ";
-        log("Default cmdline: {s} len={}", .{ cmd, cmd.len });
+        log("Default cmdline: {s} ", .{cmd});
 
         for (0..cmd_size) |i| {
             cmdx_buffer[i] = cmdline_buffer[i];
@@ -86,7 +89,7 @@ pub fn main() uefi.Status {
         cmdx_buffer[cmd_size + 1] = 0;
     } else {
         const cmd = cmdline_buffer[0..cmd_size];
-        log("Cmdline: {s} len={}", .{ cmd, cmd.len });
+        log("Cmdline: {s}", .{cmd});
 
         for (0..cmd_size) |i| {
             cmdx_buffer[i] = cmdline_buffer[i];

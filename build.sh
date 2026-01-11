@@ -1,4 +1,4 @@
-#!/bin/bash
+0#!/bin/bash
 
 # Build and test script
 # Modern languages (go/rust/zig) include optimized build systems (and package
@@ -30,56 +30,26 @@ MOUNT_DIR="${BUILD_DIR}/mnt"
 kernel_offset='0x30000000' 
 cfg_offset=0x20000000
 
-#mkdir -p "${BUILD_DIR}"
 
 build() {
     local dir=${1:-src/stub2}
     (cd ${dir} && zig build -p ${BUILD_DIR} -freference-trace=8)
 }
 
-buildr() {
-    (cd src/stub2g && cargo build --target x86_64-unknown-uefi)
-    cp src/stub2g/target/x86_64-unknown-uefi/debug/uki-stub.efi prebuilt/uki-stub.efi
-}
-
-run_qemu() {    
+# Run Qemu with UEFI firmware and a stub.
+# First param is the directory with the VFAT files placed in the expected locations.
+# Only for testing - for a VM it is better to pass the kernel and skip UEFI.
+# 
+# Env:
+# QEMU_UI - start with gtk display (to see the menu)
+run_qemu() {  
+      
     FATDIR=${1}
     local SECURE=${2:-0}
 
-    # --device help, --device foo,help -> all 'frontends'
-    # The 'microvm' variant of qemu has fewer:
-    # virtio-blk-device, virtio-pmem, virtio-scsi-device - faster
-    # virtio-net-device
-    # virtconsole, virtserialport
-    # virtio-balloon-device
-    # virtio-crypto-device
-    # virtio-mem
-    # virtio-rng-device
-    # vmcoreinfo
-    # 
-    # Regular:
-    # nvme
-    # vhost-user-blk
-    # vhost-user-fs-device,pci
-    # virtio-9p-[device,pci]
-    # e1000, rtl8139, usb-net
 
-
-    #readpe ${BUILD_DIR}/efi-verify-stub.efi
-    #readpe ${BUILD_DIR}/qemu/EFI/BOOT/bootx64.efi
-
-# -drive id=mysdcard,if=none,format=qcow2,file=/path/to/backing_file.qcow2 \
-#   -device sdhci-pci \
-#   -device sd-card,drive=mysdcard
-
-# -drive file=nvm.img,if=none,id=nvm
-# -device nvme,serial=deadbeef,drive=nvm
-#-bios "${OVMF_PATH}" \
-
-#        -drive if=pflash,format=raw,file=prebuilt/OVMF_2M.fd \
-    # Using a debian 2.7.0 UEFI, 2M + vars    
-#-boot menu=on \
-
+    # Set OVMF for testing EFI - the prebuilt image is configured with the
+    # testdata keys.
     if [ -n "${KERNEL}" ]; then
         OVMF="-kernel ${KERNEL}"
         if [ -n "${INITRD}" ]; then
@@ -88,37 +58,38 @@ run_qemu() {
     else 
         if [ ${SECURE} -eq 1 ]; then
             OVMF="-drive if=pflash,format=raw,file=prebuilt/OVMF.fd"
-            OVMF="${OVMF} --drive if=pflash,format=raw,file=prebuilt/OVMF_VARS.fd"
+            #OVMF="${OVMF} --drive if=pflash,format=raw,file=prebuilt/OVMF_VARS.fd"
+            swtpm socket --tpmstate dir=/tmp/mytpm1   --ctrl type=unixio,path=/tmp/mytpm1/swtpm-sock   --tpm2  &
+            tpm="-chardev socket,id=chrtpm,path=/tmp/mytpm1/swtpm-sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0" 
         else
             OVMF="-drive if=pflash,format=raw,file=prebuilt/OVMF_CODE.fd"
         fi
     fi
 
     qemu_base="-m 4G,maxmem=8G -smp 4 -cpu host -enable-kvm"
-    #qemu_common="${qemu_base} -display none"
-    qemu_common="${qemu_base} -nographic"
-    #qemu_common="${qemu_base} -display gtk -vga std"
+
+    if [ -z "${QEMU_UI}" ]; then
+        qemu_base="${qemu_base} -nographic"
+    else
+        qemu_base="${qemu_base} -display gtk -vga std"
+    fi
 
     # On reboot - exists, let caller to restart
-    qemu_common="${qemu_common} -no-reboot"
+    qemu_base="${qemu_base} -no-reboot"
 
-    #qemu_serial="-serial stdio"
-    qemu_serial="-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0" 
-    # stdio - no input ?
     # mon:stdio - C-a xa
-	# -display none -serial stdio
+	qemu_serial="-chardev stdio,mux=on,id=char0 -serial chardev:char0 -monitor chardev:char0" 
+    # stdio - no input ?
+    # -display none -serial stdio
 
     vols="${vols} -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=src"
     vols="${vols} -fsdev local,security_model=passthrough,id=fsdev0,path=."
-    # mount -t 9p -o trans=virtio,version=9p2000.L src /src
-
-    # swtpm socket --tpmstate dir=/tmp/mytpm1   --ctrl type=unixio,path=/tmp/mytpm1/swtpm-sock   --tpm2  &
-    #tpm="-chardev socket,id=chrtpm,path=/tmp/mytpm1/swtpm-sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0" 
+    # Use: mount -t 9p -o trans=virtio,version=9p2000.L src /src
 
     vols="${vols} -object memory-backend-file,id=mem1,share=on,mem-path=./virtio_pmem.img,size=1G"
     vols="${vols} -device virtio-pmem-pci,memdev=mem1,id=nv1"
     
-    qemu-system-x86_64 -nodefaults ${qemu_common} \
+    qemu-system-x86_64 -nodefaults ${qemu_base} \
         ${qemu_serial} \
         ${vols} \
          ${OVMF} \
@@ -214,6 +185,31 @@ initrd() {
     cp ${BUILD_DIR}/efi/EFI/LINUX/INITRD.IMG prebuilt/initrd.img
 }
 
+initrd2() {
+    variant=${1:-deb}
+    local ep="--entrypoint /ws/signer/sbin/setup-efi"
+    #ep="--entrypoint /bin/sh"
+    # cctl script starts a container using .cache/PROJECT as /data and
+    # current dir as /ws 
+    VOLS="--mount type=image,source=modloop:${variant},destination=/mnt/modloop" 
+    VOLS=$VOLS cctl run ${PROJECT} ${ep} \
+       costinm/signer booster_initrd
+       
+    mkdir -p ${BUILD_DIR}/${variant}
+
+    cp ${BUILD_DIR}/efi/EFI/LINUX/INITRD.IMG prebuilt/initrd.img
+}
+
+debug() {
+    variant=${1:-deb}
+    local ep="--entrypoint /bin/sh"
+    # cctl script starts a container using .cache/PROJECT as /data and
+    # current dir as /ws 
+    VOLS="--mount type=image,source=modloop:${variant},destination=/mnt/modloop" 
+    VOLS=$VOLS cctl run ${PROJECT} ${ep} \
+       costinm/signer
+}
+
 # Init the keys.
 init_secrets() {
     local dir=${1:-${HOME}/.ssh/uefi-keys}
@@ -240,6 +236,7 @@ sign() {
 # Unverified/install mode, with initrd. For unverified always using initrd.
 simple() {
     build src/stub0
+    local k=${1:-${SRC}/prebuilt/boot/vmlinuz}
 
     mkdir -p ${BUILD_DIR}/qemu-unv/EFI/LINUX
 
@@ -251,7 +248,7 @@ simple() {
     cp ${HOME}/.ssh/uefi-keys/uefi-keys/*.crt ${BUILD_DIR}/qemu-unv
 
     OUT=${BUILD_DIR}/qemu-unv \
-    KERNEL=${SRC}/prebuilt/boot/vmlinuz \
+    KERNEL=$k \
     STUB=${BUILD_DIR}/EFI/BOOT/BOOTx64.EFI \
        ./signer/sbin/setup-efi unsigned
 
